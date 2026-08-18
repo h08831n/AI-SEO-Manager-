@@ -77,6 +77,31 @@ enum OutboxStatus {
   FAILED
 }
 
+enum FrontierStatus {
+  DISCOVERED
+  QUEUED
+  FETCHING
+  FETCHED
+  SKIPPED
+  FAILED
+  BLOCKED_ROBOTS
+  BLOCKED_SCOPE
+  BLOCKED_SECURITY
+}
+
+enum CrawlRunLifecycle {
+  PENDING
+  QUEUED
+  RUNNING
+  PAUSING
+  PAUSED
+  CANCELLING
+  CANCELLED
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+}
+
 // ----------------------------------------------------
 // Multi-Tenancy & RBAC Models
 // ----------------------------------------------------
@@ -140,8 +165,10 @@ model Website {
   workspace        Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   settings         WebsiteSettings?
   integrations     Integration[]
+  urlIdentities    UrlIdentity[]
   crawlRuns        CrawlRun[]
   crawledPages     CrawledPage[]
+  seoEvents        SeoEvent[]
   recommendations  SeoRecommendation[]
   tasks            SeoTask[]
   actionExecutions ActionExecution[]
@@ -193,26 +220,84 @@ model Integration {
 }
 
 // ----------------------------------------------------
-// Technical Crawl & Issues
+// Technical Crawl & Site Graph Models
 // ----------------------------------------------------
 
-model CrawlRun {
-  id              String        @id @default(uuid())
-  websiteId       String
-  status          String        @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED
-  startedAt       DateTime      @default(now())
-  completedAt     DateTime?
-  totalPages      Int           @default(0)
-  totalIssues     Int           @default(0)
-  durationMs      Int?
-  triggerSource   String        @default("MANUAL")
+model UrlIdentity {
+  id                String       @id @default(uuid())
+  websiteId         String
+  normalizedUrl     String
+  pathname          String
+  firstDiscoveredAt DateTime     @default(now())
+  lastSeenAt        DateTime     @default(now())
+  discoverySources  String[]     @default(["SEED"]) // SEED, HTML_LINK, SITEMAP, REDIRECT, CANONICAL
+  inlinksCount      Int          @default(0)
+  outlinksCount     Int          @default(0)
+  minCrawlDepth     Int          @default(0)
+  isOrphanCandidate Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
-  website         Website       @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  pages           CrawledPage[]
-  issues          CrawlIssue[]
+  website           Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, normalizedUrl])
+  @@index([websiteId, isOrphanCandidate])
+  @@map("url_identities")
+}
+
+model CrawlRun {
+  id                  String            @id @default(uuid())
+  websiteId           String
+  status              CrawlRunLifecycle @default(PENDING)
+  seedUrl             String
+  configJson          String            // Serialized CrawlConfig
+  startedAt           DateTime          @default(now())
+  completedAt         DateTime?
+  durationMs          Int?
+  totalPages          Int               @default(0)
+  totalIssues         Int               @default(0)
+  urlsDiscovered      Int               @default(0)
+  urlsQueued          Int               @default(0)
+  urlsFetched         Int               @default(0)
+  urlsSkipped         Int               @default(0)
+  urlsFailed          Int               @default(0)
+  robotsTxtStatus     String?
+  robotsTxtHash       String?
+  sitemapsDiscovered  String[]          @default([])
+  triggerSource       String            @default("MANUAL")
+
+  website             Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  pages               CrawledPage[]
+  issues              CrawlIssue[]
+  links               InternalLinkEdge[]
+  frontierEntries     CrawlFrontierEntry[]
+  events              SeoEvent[]
 
   @@index([websiteId, startedAt])
+  @@index([websiteId, status])
   @@map("crawl_runs")
+}
+
+model CrawlFrontierEntry {
+  id              String         @id @default(uuid())
+  crawlRunId      String
+  url             String
+  normalizedUrl   String
+  depth           Int            @default(0)
+  priority        Int            @default(10)
+  status          FrontierStatus @default(DISCOVERED)
+  discoverySource String         @default("HTML_LINK") // SEED, SITEMAP, HTML_LINK, REDIRECT
+  parentUrl       String?
+  attemptCount    Int            @default(0)
+  lastError       String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  crawlRun        CrawlRun       @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlRunId, normalizedUrl])
+  @@index([crawlRunId, status, priority])
+  @@map("crawl_frontier_entries")
 }
 
 model CrawledPage {
@@ -220,11 +305,19 @@ model CrawledPage {
   websiteId              String
   crawlRunId             String
   url                    String
+  normalizedUrl          String
   pathname               String
   statusCode             Int
-  loadTimeMs             Int
+  finalUrl               String?
+  redirectCount          Int          @default(0)
+  redirectChainJson      String?      // Hop array [{ source, destination, status }]
+  loadTimeMs             Int          @default(0)
+  contentLengthBytes     Int          @default(0)
   isIndexable            Boolean      @default(true)
+  indexabilityStatus     String       @default("INDEXABLE")
+  indexabilityReasons    String[]     @default([])
   canonicalUrl           String?
+  normalizedCanonicalUrl String?
   canonicalMatch         Boolean      @default(true)
   title                  String?
   titleLength            Int          @default(0)
@@ -234,31 +327,71 @@ model CrawledPage {
   xRobotsTag             String?
   h1Tags                 String[]     @default([])
   h2Count                Int          @default(0)
+  h3Count                Int          @default(0)
   wordCount              Int          @default(0)
+  contentHash            String?      // SHA-256 hash of normalized visible text
+  simHash                String?      // 64-bit SimHash hex for near-duplicate clustering
+  isExactDuplicate       Boolean      @default(false)
+  duplicateClusterId     String?
+  isThinContent          Boolean      @default(false)
+  isPossibleSoft404      Boolean      @default(false)
+  soft404Confidence      Float        @default(0.0)
+  internalInlinksCount   Int          @default(0)
   internalOutlinksCount  Int          @default(0)
   externalOutlinksCount  Int          @default(0)
   imagesCount            Int          @default(0)
   missingAltCount        Int          @default(0)
   schemaTypes            String[]     @default([])
+  schemaStatus           String       @default("STRUCTURE_UNKNOWN")
+  openGraphJson          String?
+  twitterCardJson        String?
+  hreflangsJson          String?
+  crawlDepth             Int          @default(0)
   crawledAt              DateTime     @default(now())
 
   website                Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   crawlRun               CrawlRun     @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
   issues                 CrawlIssue[]
 
-  @@index([websiteId, url])
-  @@index([crawlRunId])
+  @@unique([crawlRunId, normalizedUrl])
+  @@index([websiteId, normalizedUrl])
+  @@index([crawlRunId, statusCode])
+  @@index([crawlRunId, isIndexable])
   @@map("crawled_pages")
+}
+
+model InternalLinkEdge {
+  id               String   @id @default(uuid())
+  crawlRunId       String
+  sourceUrl        String
+  targetUrl        String
+  normalizedTarget String
+  anchorText       String?
+  isInternal       Boolean  @default(true)
+  rel              String?
+  isNofollow       Boolean  @default(false)
+  targetStatusCode Int?
+  isBroken         Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  crawlRun         CrawlRun @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
+
+  @@index([crawlRunId, sourceUrl])
+  @@index([crawlRunId, normalizedTarget])
+  @@index([crawlRunId, isBroken])
+  @@map("internal_link_edges")
 }
 
 model CrawlIssue {
   id            String        @id @default(uuid())
   crawlRunId    String
   crawledPageId String?
+  ruleKey       String
+  ruleVersion   String        @default("1.0.0")
   type          String
   severity      IssueSeverity
   message       String
-  evidence      String
+  evidence      String        // Serialized JSON evidence object
   impact        String
   resolved      Boolean       @default(false)
   createdAt     DateTime      @default(now())
@@ -267,7 +400,35 @@ model CrawlIssue {
   crawledPage   CrawledPage?  @relation(fields: [crawledPageId], references: [id], onDelete: SetNull)
 
   @@index([crawlRunId, severity])
+  @@index([crawlRunId, ruleKey])
   @@map("crawl_issues")
+}
+
+// ----------------------------------------------------
+// SEO Domain Event Tracking (Dedicated Historical Event Model)
+// ----------------------------------------------------
+
+model SeoEvent {
+  id          String   @id @default(uuid())
+  websiteId   String
+  crawlRunId  String?
+  eventType   String   // NEW_URL, REMOVED_URL, STATUS_CHANGED, TITLE_CHANGED, CANONICAL_CHANGED, ROBOTS_CHANGED, INDEXABILITY_CHANGED, NEW_404, RECOVERED_404, etc.
+  entityType  String   // URL, SITE, ROBOTS, SITEMAP
+  entityUrl   String
+  beforeValue String?  // Serialized previous state
+  afterValue  String?  // Serialized observed state
+  deltaNotes  String?
+  severity    String   @default("INFO") // CRITICAL, HIGH, MEDIUM, LOW, INFO
+  source      String   @default("CRAWLER") // CRAWLER, GSC, MANUAL
+  detectedAt  DateTime @default(now())
+
+  website     Website   @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  crawlRun    CrawlRun? @relation(fields: [crawlRunId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId, detectedAt])
+  @@index([websiteId, eventType])
+  @@index([crawlRunId])
+  @@map("seo_events")
 }
 
 // ----------------------------------------------------
