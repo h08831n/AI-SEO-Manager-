@@ -1,6 +1,5 @@
 import { CrawlRunLifecycle } from '@prisma/client';
 import { getPrismaClient } from '../db/prismaClient';
-import { UrlNormalizer } from '../services/crawler/urlNormalizer';
 
 export interface CrawlRunRecord {
   id: string;
@@ -22,6 +21,20 @@ export interface CrawlRunRecord {
   robotsTxtHash?: string;
   sitemapsDiscovered: string[];
   triggerSource: string;
+}
+
+export interface UrlIdentityRecord {
+  id: string;
+  websiteId: string;
+  normalizedUrl: string;
+  pathname: string;
+  firstDiscoveredAt: string;
+  lastSeenAt: string;
+  discoverySources: string[];
+  inlinksCount: number;
+  outlinksCount: number;
+  minCrawlDepth: number;
+  isOrphanCandidate: boolean;
 }
 
 export interface CrawledPageRecord {
@@ -67,6 +80,9 @@ export interface CrawledPageRecord {
   missingAltCount: number;
   schemaTypes: string[];
   schemaStatus: string;
+  openGraphJson?: string;
+  twitterCardJson?: string;
+  hreflangsJson?: string;
   crawlDepth: number;
   crawledAt: string;
 }
@@ -116,14 +132,116 @@ export interface SeoEventRecord {
   detectedAt: string;
 }
 
-// In-Memory Dev / Standalone Store (strictly documented and isolated)
+// In-Memory Store for DEV/TEST
+const devUrlIdentities: Map<string, UrlIdentityRecord> = new Map();
 const devCrawlRuns: Map<string, CrawlRunRecord> = new Map();
-const devCrawledPages: Map<string, CrawledPageRecord[]> = new Map(); // crawlRunId -> pages
-const devCrawlIssues: Map<string, CrawlIssueRecord[]> = new Map(); // crawlRunId -> issues
-const devLinkEdges: Map<string, InternalLinkEdgeRecord[]> = new Map(); // crawlRunId -> links
-const devSeoEvents: Map<string, SeoEventRecord[]> = new Map(); // websiteId -> events
+const devCrawledPages: Map<string, CrawledPageRecord[]> = new Map();
+const devCrawlIssues: Map<string, CrawlIssueRecord[]> = new Map();
+const devLinkEdges: Map<string, InternalLinkEdgeRecord[]> = new Map();
+const devSeoEvents: Map<string, SeoEventRecord[]> = new Map();
 
 export class CrawlRepository {
+  public static async getOrCreateUrlIdentity(
+    websiteId: string,
+    normalizedUrl: string,
+    discoverySource: string
+  ): Promise<UrlIdentityRecord> {
+    const prisma = getPrismaClient();
+    const pathname = new URL(normalizedUrl).pathname;
+    const now = new Date();
+
+    if (prisma) {
+      try {
+        const existing = await prisma.urlIdentity.findUnique({
+          where: { websiteId_normalizedUrl: { websiteId, normalizedUrl } },
+        });
+
+        if (existing) {
+          const updated = await prisma.urlIdentity.update({
+            where: { id: existing.id },
+            data: {
+              lastSeenAt: now,
+              discoverySources: Array.from(new Set([...existing.discoverySources, discoverySource])),
+            },
+          });
+          return {
+            id: updated.id,
+            websiteId: updated.websiteId,
+            normalizedUrl: updated.normalizedUrl,
+            pathname: updated.pathname,
+            firstDiscoveredAt: updated.firstDiscoveredAt.toISOString(),
+            lastSeenAt: updated.lastSeenAt.toISOString(),
+            discoverySources: updated.discoverySources,
+            inlinksCount: updated.inlinksCount,
+            outlinksCount: updated.outlinksCount,
+            minCrawlDepth: updated.minCrawlDepth,
+            isOrphanCandidate: updated.isOrphanCandidate,
+          };
+        }
+
+        const created = await prisma.urlIdentity.create({
+          data: {
+            id: `url-id-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            websiteId,
+            normalizedUrl,
+            pathname,
+            firstDiscoveredAt: now,
+            lastSeenAt: now,
+            discoverySources: [discoverySource],
+            inlinksCount: 0,
+            outlinksCount: 0,
+            minCrawlDepth: 0,
+            isOrphanCandidate: discoverySource === 'SITEMAP',
+          },
+        });
+
+        return {
+          id: created.id,
+          websiteId: created.websiteId,
+          normalizedUrl: created.normalizedUrl,
+          pathname: created.pathname,
+          firstDiscoveredAt: created.firstDiscoveredAt.toISOString(),
+          lastSeenAt: created.lastSeenAt.toISOString(),
+          discoverySources: created.discoverySources,
+          inlinksCount: created.inlinksCount,
+          outlinksCount: created.outlinksCount,
+          minCrawlDepth: created.minCrawlDepth,
+          isOrphanCandidate: created.isOrphanCandidate,
+        };
+      } catch (err) {
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: UrlIdentity write failed: ${err}`);
+        }
+      }
+    }
+
+    const key = `${websiteId}:${normalizedUrl}`;
+    const existing = devUrlIdentities.get(key);
+    if (existing) {
+      existing.lastSeenAt = now.toISOString();
+      if (!existing.discoverySources.includes(discoverySource)) {
+        existing.discoverySources.push(discoverySource);
+      }
+      return existing;
+    }
+
+    const record: UrlIdentityRecord = {
+      id: `url-id-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      websiteId,
+      normalizedUrl,
+      pathname,
+      firstDiscoveredAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      discoverySources: [discoverySource],
+      inlinksCount: 0,
+      outlinksCount: 0,
+      minCrawlDepth: 0,
+      isOrphanCandidate: discoverySource === 'SITEMAP',
+    };
+    devUrlIdentities.set(key, record);
+    return record;
+  }
+
   public static async createCrawlRun(params: {
     websiteId: string;
     seedUrl: string;
@@ -217,7 +335,7 @@ export class CrawlRepository {
         const res = await prisma.crawlRun.findUnique({ where: { id } });
         if (res) return res as unknown as CrawlRunRecord;
       } catch {
-        // Fallback to dev store if not in prod
+        // Fallback
       }
     }
     return devCrawlRuns.get(id) || null;
@@ -233,7 +351,7 @@ export class CrawlRepository {
         });
         return res as unknown as CrawlRunRecord[];
       } catch {
-        // Fallback to dev store
+        // Fallback
       }
     }
     return Array.from(devCrawlRuns.values())
@@ -370,70 +488,124 @@ export class CrawlRepository {
     devSeoEvents.set(websiteId, [...current, ...records]);
   }
 
-  public static async getCrawledPages(crawlRunId: string): Promise<CrawledPageRecord[]> {
+  // Database-Level Pagination
+  public static async getCrawledPages(
+    crawlRunId: string,
+    options: { offset?: number; limit?: number } = {}
+  ): Promise<{ total: number; pages: CrawledPageRecord[] }> {
+    const { offset = 0, limit = 50 } = options;
     const prisma = getPrismaClient();
+
     if (prisma) {
       try {
-        const res = await prisma.crawledPage.findMany({
+        const total = await prisma.crawledPage.count({ where: { crawlRunId } });
+        const rows = await prisma.crawledPage.findMany({
           where: { crawlRunId },
           orderBy: { crawledAt: 'asc' },
+          skip: offset,
+          take: limit,
         });
-        return res as unknown as CrawledPageRecord[];
+        return { total, pages: rows as unknown as CrawledPageRecord[] };
       } catch {
         // Fallback
       }
     }
-    return devCrawledPages.get(crawlRunId) || [];
+
+    const all = devCrawledPages.get(crawlRunId) || [];
+    return {
+      total: all.length,
+      pages: all.slice(offset, offset + limit),
+    };
   }
 
-  public static async getCrawlIssues(crawlRunId: string): Promise<CrawlIssueRecord[]> {
+  public static async getCrawlIssues(
+    crawlRunId: string,
+    options: { offset?: number; limit?: number } = {}
+  ): Promise<{ total: number; issues: CrawlIssueRecord[] }> {
+    const { offset = 0, limit = 100 } = options;
     const prisma = getPrismaClient();
+
     if (prisma) {
       try {
-        const res = await prisma.crawlIssue.findMany({
+        const total = await prisma.crawlIssue.count({ where: { crawlRunId } });
+        const rows = await prisma.crawlIssue.findMany({
           where: { crawlRunId },
           orderBy: { createdAt: 'desc' },
+          skip: offset,
+          take: limit,
         });
-        return res as unknown as CrawlIssueRecord[];
+        return { total, issues: rows as unknown as CrawlIssueRecord[] };
       } catch {
         // Fallback
       }
     }
-    return devCrawlIssues.get(crawlRunId) || [];
+
+    const all = devCrawlIssues.get(crawlRunId) || [];
+    return {
+      total: all.length,
+      issues: all.slice(offset, offset + limit),
+    };
   }
 
-  public static async getSeoEvents(websiteId: string): Promise<SeoEventRecord[]> {
+  public static async getSeoEvents(
+    websiteId: string,
+    options: { offset?: number; limit?: number } = {}
+  ): Promise<{ total: number; events: SeoEventRecord[] }> {
+    const { offset = 0, limit = 100 } = options;
     const prisma = getPrismaClient();
+
     if (prisma) {
       try {
-        const res = await prisma.seoEvent.findMany({
+        const total = await prisma.seoEvent.count({ where: { websiteId } });
+        const rows = await prisma.seoEvent.findMany({
           where: { websiteId },
           orderBy: { detectedAt: 'desc' },
+          skip: offset,
+          take: limit,
         });
-        return res as unknown as SeoEventRecord[];
+        return { total, events: rows as unknown as SeoEventRecord[] };
       } catch {
         // Fallback
       }
     }
-    return devSeoEvents.get(websiteId) || [];
+
+    const all = devSeoEvents.get(websiteId) || [];
+    return {
+      total: all.length,
+      events: all.slice(offset, offset + limit),
+    };
   }
 
-  public static async getLinkEdges(crawlRunId: string): Promise<InternalLinkEdgeRecord[]> {
+  public static async getLinkEdges(
+    crawlRunId: string,
+    options: { offset?: number; limit?: number } = {}
+  ): Promise<{ total: number; links: InternalLinkEdgeRecord[] }> {
+    const { offset = 0, limit = 100 } = options;
     const prisma = getPrismaClient();
+
     if (prisma) {
       try {
-        const res = await prisma.internalLinkEdge.findMany({
+        const total = await prisma.internalLinkEdge.count({ where: { crawlRunId } });
+        const rows = await prisma.internalLinkEdge.findMany({
           where: { crawlRunId },
+          skip: offset,
+          take: limit,
         });
-        return res as unknown as InternalLinkEdgeRecord[];
+        return { total, links: rows as unknown as InternalLinkEdgeRecord[] };
       } catch {
         // Fallback
       }
     }
-    return devLinkEdges.get(crawlRunId) || [];
+
+    const all = devLinkEdges.get(crawlRunId) || [];
+    return {
+      total: all.length,
+      links: all.slice(offset, offset + limit),
+    };
   }
 
   public static async clearForTesting(): Promise<void> {
+    devUrlIdentities.clear();
     devCrawlRuns.clear();
     devCrawledPages.clear();
     devCrawlIssues.clear();

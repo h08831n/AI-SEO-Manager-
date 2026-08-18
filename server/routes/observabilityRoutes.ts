@@ -8,18 +8,24 @@ const router = Router();
 
 type ServiceStatus = 'UP' | 'DOWN' | 'DEGRADED' | 'UNKNOWN' | 'NOT_CONFIGURED';
 
+// Track worker heartbeat timestamp
+let lastWorkerHeartbeat: number = Date.now();
+
+export function recordWorkerHeartbeat(): void {
+  lastWorkerHeartbeat = Date.now();
+}
+
 // GET /api/observability/status
 router.get('/status', async (req: Request, res: Response) => {
   let dbStatus: ServiceStatus = 'NOT_CONFIGURED';
   let redisStatus: ServiceStatus = 'NOT_CONFIGURED';
   let workerStatus: ServiceStatus = 'NOT_CONFIGURED';
 
-  // 1. Check PostgreSQL Database Connection (without exposing credentials)
+  // 1. Check PostgreSQL Database Connection
   if (process.env.DATABASE_URL) {
     try {
       const prisma = getPrismaClient();
       if (prisma) {
-        // Execute quick query
         await prisma.$queryRaw`SELECT 1`;
         dbStatus = 'UP';
       } else {
@@ -45,11 +51,23 @@ router.get('/status', async (req: Request, res: Response) => {
     }
   }
 
-  // 3. Worker Status
-  workerStatus = redisStatus === 'UP' ? 'UP' : redisStatus === 'DOWN' ? 'DOWN' : 'NOT_CONFIGURED';
+  // 3. Worker Status (Independent heartbeat verification)
+  const isWorkerFresh = Date.now() - lastWorkerHeartbeat < 60000;
+  if (process.env.REDIS_URL && redisStatus === 'UP') {
+    workerStatus = isWorkerFresh ? 'UP' : 'DEGRADED';
+  } else if (!process.env.REDIS_URL) {
+    workerStatus = 'NOT_CONFIGURED';
+  } else {
+    workerStatus = 'DOWN';
+  }
 
-  // 4. Overall health rollup
-  const isHealthy = dbStatus !== 'DOWN' && redisStatus !== 'DOWN';
+  // 4. Gemini AI Model Configuration Check
+  let geminiStatus: ServiceStatus = 'NOT_CONFIGURED';
+  if (process.env.GEMINI_API_KEY) {
+    geminiStatus = 'UP';
+  }
+
+  const isHealthy = dbStatus !== 'DOWN' && redisStatus !== 'DOWN' && workerStatus !== 'DOWN';
 
   return res.json({
     status: isHealthy ? 'HEALTHY' : 'DEGRADED',
@@ -59,11 +77,12 @@ router.get('/status', async (req: Request, res: Response) => {
       database: dbStatus,
       redis: redisStatus,
       worker: workerStatus,
+      lastWorkerHeartbeat: new Date(lastWorkerHeartbeat).toISOString(),
       integrations: {
         googleSearchConsole: 'NOT_CONFIGURED',
         googleAnalytics4: 'NOT_CONFIGURED',
         wordPress: 'NOT_CONFIGURED',
-        gemini: process.env.GEMINI_API_KEY ? 'UP' : 'NOT_CONFIGURED',
+        gemini: geminiStatus,
       },
     },
     engines: {

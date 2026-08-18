@@ -4,14 +4,21 @@ import { UrlScopePolicy, CrawlScopeConfig } from './urlScopePolicy';
 import { RobotsService, ParsedRobotsTxt } from './robotsService';
 import { SitemapService } from './sitemapService';
 import { SafeUrlPolicy } from '../../security/safeUrlPolicy';
-import { HtmlParser } from './htmlParser';
-import { RedirectAnalyzer, RedirectHop } from './redirectAnalyzer';
+import { ComprehensiveHtmlParser } from './comprehensiveHtmlParser';
+import { CanonicalAnalyzer } from './canonicalAnalyzer';
+import { HreflangAnalyzer } from './hreflangAnalyzer';
+import { Soft404Detector } from './soft404Detector';
 import { IndexabilityAnalyzer } from './indexabilityAnalyzer';
 import { DuplicateContentAnalyzer } from './duplicateContentAnalyzer';
 import { LinkGraphBuilder, DiscoveredLink } from './linkGraphBuilder';
-import { TechnicalIssueDetector, EvaluatedIssue } from './technicalIssueDetector';
+import { ExpandedTechnicalIssueDetector } from './expandedTechnicalIssueDetector';
 import { CrawlSnapshotComparator, CrawledPageSnapshot } from './crawlSnapshotComparator';
-import { CrawlRepository, CrawledPageRecord, CrawlIssueRecord, InternalLinkEdgeRecord, SeoEventRecord } from '../../repositories/crawlRepository';
+import {
+  CrawlRepository,
+  CrawledPageRecord,
+  CrawlIssueRecord,
+  InternalLinkEdgeRecord,
+} from '../../repositories/crawlRepository';
 
 export interface CrawlConfiguration {
   websiteId: string;
@@ -37,25 +44,33 @@ export class CrawlCoordinator {
 
   public static cancelCrawl(crawlRunId: string): boolean {
     const controller = this.activeCrawlControllers.get(crawlRunId);
+    this.pausedCrawls.delete(crawlRunId);
     if (controller) {
       controller.abort();
       this.activeCrawlControllers.delete(crawlRunId);
       return true;
     }
-    return false;
+    // Update repository state if crawl run is recorded
+    CrawlRepository.updateCrawlRun(crawlRunId, { status: 'CANCELLED', completedAt: new Date().toISOString() });
+    return true;
   }
 
   public static pauseCrawl(crawlRunId: string): boolean {
     this.pausedCrawls.add(crawlRunId);
+    CrawlRepository.updateCrawlRun(crawlRunId, { status: 'PAUSING' });
     return true;
   }
 
   public static resumeCrawl(crawlRunId: string): boolean {
     this.pausedCrawls.delete(crawlRunId);
+    CrawlRepository.updateCrawlRun(crawlRunId, { status: 'RUNNING' });
     return true;
   }
 
-  public static async executeCrawl(config: CrawlConfiguration): Promise<{
+  public static async executeCrawl(
+    config: CrawlConfiguration,
+    existingCrawlRunId?: string
+  ): Promise<{
     crawlRunId: string;
     totalPages: number;
     totalIssues: number;
@@ -68,7 +83,6 @@ export class CrawlCoordinator {
       userAgent = 'AISEOManagerBot/2.0 (+https://techscale.io/bot)',
       maxUrls = 50,
       maxDepth = 3,
-      maxConcurrency = 2,
       requestTimeoutMs = 8000,
       maxResponseBytes = 4 * 1024 * 1024,
       maxRedirects = 5,
@@ -83,14 +97,16 @@ export class CrawlCoordinator {
     const parsedSeed = new URL(normalizedSeed);
     const originUrl = `${parsedSeed.protocol}//${parsedSeed.host}`;
 
-    // 1. Create CrawlRun in Repository
-    const crawlRun = await CrawlRepository.createCrawlRun({
-      websiteId,
-      seedUrl: normalizedSeed,
-      config,
-    });
+    let crawlRunId = existingCrawlRunId;
+    if (!crawlRunId) {
+      const crawlRun = await CrawlRepository.createCrawlRun({
+        websiteId,
+        seedUrl: normalizedSeed,
+        config,
+      });
+      crawlRunId = crawlRun.id;
+    }
 
-    const crawlRunId = crawlRun.id;
     const abortController = new AbortController();
     this.activeCrawlControllers.set(crawlRunId, abortController);
     const startTime = Date.now();
@@ -103,10 +119,10 @@ export class CrawlCoordinator {
       maxDepth,
     };
 
-    const frontier = new CrawlFrontier();
+    const frontier = new CrawlFrontier(crawlRunId);
     let robotsParsed: ParsedRobotsTxt = { rules: [], sitemaps: [], rawContent: '' };
 
-    // 2. Fetch & Parse robots.txt
+    // 1. Fetch & Parse robots.txt
     if (respectRobots) {
       const robotsRes = await RobotsService.fetchAndParseRobots(originUrl, userAgent);
       robotsParsed = robotsRes.parsed;
@@ -116,7 +132,7 @@ export class CrawlCoordinator {
       });
     }
 
-    // 3. Discover Sitemaps
+    // 2. Discover Sitemaps
     const sitemapsDiscovered: string[] = [];
     if (crawlSitemaps) {
       const candidateSitemaps = [
@@ -127,15 +143,14 @@ export class CrawlCoordinator {
       const uniqueSitemaps = Array.from(new Set(candidateSitemaps));
 
       for (const smUrl of uniqueSitemaps) {
-        if (frontier.size() >= maxUrls) break;
+        if ((await frontier.size()) >= maxUrls) break;
         const smResult = await SitemapService.discoverUrlsFromSitemap(smUrl);
         if (smResult.totalUrls > 0) {
           sitemapsDiscovered.push(smUrl);
           for (const discovered of smResult.discoveredUrls) {
             const scopeCheck = UrlScopePolicy.isUrlInScope(discovered.normalizedUrl, 1, scopeConfig);
             if (scopeCheck.allowed) {
-              frontier.enqueue(
-                crawlRunId,
+              await frontier.enqueue(
                 discovered.loc,
                 discovered.normalizedUrl,
                 1,
@@ -148,19 +163,28 @@ export class CrawlCoordinator {
       }
     }
 
-    // Always seed the entrypoint
-    frontier.enqueue(crawlRunId, seedUrl, normalizedSeed, 0, 'SEED', 20);
+    // 3. Seed entrypoint and register stable UrlIdentity
+    await CrawlRepository.getOrCreateUrlIdentity(websiteId, normalizedSeed, 'SEED');
+    await frontier.enqueue(seedUrl, normalizedSeed, 0, 'SEED', 20);
 
     const crawledPagesBuffer: CrawledPageRecord[] = [];
     const discoveredLinkEdges: DiscoveredLink[] = [];
     const detectedIssuesBuffer: CrawlIssueRecord[] = [];
+    let hadFetchErrors = false;
 
     // 4. Crawl Execution Loop
     try {
-      while (frontier.size() > 0 && crawledPagesBuffer.length < maxUrls) {
+      while ((await frontier.size()) > 0 && crawledPagesBuffer.length < maxUrls) {
         if (abortController.signal.aborted) {
-          await CrawlRepository.updateCrawlRun(crawlRunId, { status: 'CANCELLED' });
-          break;
+          await CrawlRepository.updateCrawlRun(crawlRunId, { status: 'CANCELLED', completedAt: new Date().toISOString() });
+          this.activeCrawlControllers.delete(crawlRunId);
+          return {
+            crawlRunId,
+            totalPages: crawledPagesBuffer.length,
+            totalIssues: detectedIssuesBuffer.length,
+            durationMs: Date.now() - startTime,
+            status: 'CANCELLED',
+          };
         }
 
         while (this.pausedCrawls.has(crawlRunId)) {
@@ -168,22 +192,20 @@ export class CrawlCoordinator {
           if (abortController.signal.aborted) break;
         }
 
-        const nextItem = frontier.dequeue();
+        const nextItem = await frontier.dequeue();
         if (!nextItem) break;
 
         // Check Robots
         if (respectRobots) {
           const robotsCheck = RobotsService.isAllowed(robotsParsed, nextItem.url, userAgent);
           if (!robotsCheck.allowed) {
-            frontier.markBlocked(nextItem.normalizedUrl, 'ROBOTS');
+            await frontier.markBlocked(nextItem.normalizedUrl, 'ROBOTS');
             continue;
           }
         }
 
-        // Fetch URL
+        // Safe Fetch
         let fetchResult: any;
-        const redirectChain: RedirectHop[] = [];
-
         try {
           fetchResult = await SafeUrlPolicy.safeFetch(nextItem.url, {
             timeoutMs: requestTimeoutMs,
@@ -192,33 +214,62 @@ export class CrawlCoordinator {
             userAgent,
           });
         } catch (fetchErr: any) {
-          frontier.markFailed(nextItem.normalizedUrl, fetchErr.message);
+          hadFetchErrors = true;
+          await frontier.markFailed(nextItem.normalizedUrl, fetchErr.message);
           continue;
         }
 
-        // Parse HTML
-        const parsedHtml = HtmlParser.parse(
+        // Comprehensive HTML Parsing
+        const parsedHtml = ComprehensiveHtmlParser.parse(
           fetchResult.body,
           fetchResult.finalUrl,
-          fetchResult.statusCode,
-          fetchResult.headers
+          originUrl
         );
 
-        // Indexability Evaluation
+        // 5. Canonical Analysis
+        const canonicalResult = CanonicalAnalyzer.analyze(
+          fetchResult.finalUrl,
+          parsedHtml.canonicalUrl,
+          parsedHtml.canonicalTagsCount,
+          originUrl
+        );
+
+        // 6. Hreflang Analysis
+        const hreflangResult = HreflangAnalyzer.analyze(
+          fetchResult.finalUrl,
+          parsedHtml.hreflangs.map((h) => ({
+            lang: h.lang,
+            href: h.href,
+            normalizedHref: UrlNormalizer.normalize(h.href, originUrl),
+            isValidSyntax: true,
+          }))
+        );
+
+        // 7. Soft 404 Detection
+        const soft404Result = Soft404Detector.evaluate({
+          statusCode: fetchResult.statusCode,
+          title: parsedHtml.title || undefined,
+          h1Tags: parsedHtml.h1Tags,
+          visibleText: parsedHtml.visibleText,
+          wordCount: parsedHtml.wordCount,
+        });
+
+        // 8. Indexability Evaluation
         const indexability = IndexabilityAnalyzer.evaluate({
           statusCode: fetchResult.statusCode,
           isNoIndexMeta: Boolean(parsedHtml.metaRobots && parsedHtml.metaRobots.toLowerCase().includes('noindex')),
-          isNoIndexHeader: Boolean(parsedHtml.xRobotsTag && parsedHtml.xRobotsTag.toLowerCase().includes('noindex')),
+          isNoIndexHeader: Boolean(fetchResult.headers['x-robots-tag'] && fetchResult.headers['x-robots-tag'].toLowerCase().includes('noindex')),
           isRobotsBlocked: false,
-          hasCanonical: Boolean(parsedHtml.canonicalUrl),
-          isSelfCanonical: parsedHtml.canonicalMatch,
-          canonicalTargetUrl: parsedHtml.canonicalUrl || undefined,
+          hasCanonical: Boolean(canonicalResult.hasCanonical),
+          isSelfCanonical: canonicalResult.isSelfCanonical,
+          canonicalTargetUrl: canonicalResult.normalizedCanonical || undefined,
           isErrorStatus: fetchResult.statusCode >= 400,
         });
 
-        // Content Hashing
-        const contentHash = DuplicateContentAnalyzer.generateExactHash(fetchResult.body);
-        const simHash = DuplicateContentAnalyzer.generateSimHash64(fetchResult.body);
+        // 9. Text Content Hash & SimHash on NORMALIZED VISIBLE TEXT (prevents markup diff churn)
+        const normalizedText = parsedHtml.visibleText.toLowerCase().replace(/\s+/g, ' ').trim();
+        const contentHash = DuplicateContentAnalyzer.generateExactHash(normalizedText);
+        const simHash = DuplicateContentAnalyzer.generateSimHash64(normalizedText);
 
         const pageRecord: CrawledPageRecord = {
           id: `page-${crawledPagesBuffer.length + 1}`,
@@ -230,70 +281,102 @@ export class CrawlCoordinator {
           statusCode: fetchResult.statusCode,
           finalUrl: fetchResult.finalUrl,
           redirectCount: fetchResult.redirectCount,
-          redirectChainJson: JSON.stringify(redirectChain),
+          redirectChainJson: JSON.stringify(fetchResult.redirectChain || []),
           loadTimeMs: fetchResult.loadTimeMs,
-          contentLengthBytes: fetchResult.body.length,
+          contentLengthBytes: fetchResult.rawBuffer ? fetchResult.rawBuffer.length : fetchResult.body.length,
           isIndexable: indexability.isIndexable,
           indexabilityStatus: indexability.indexabilityStatus,
           indexabilityReasons: indexability.reasons,
-          canonicalUrl: parsedHtml.canonicalUrl || undefined,
-          normalizedCanonicalUrl: parsedHtml.canonicalUrl ? UrlNormalizer.normalize(parsedHtml.canonicalUrl, originUrl) : undefined,
-          canonicalMatch: parsedHtml.canonicalMatch,
+          canonicalUrl: canonicalResult.rawCanonical || undefined,
+          normalizedCanonicalUrl: canonicalResult.normalizedCanonical || undefined,
+          canonicalMatch: canonicalResult.isSelfCanonical,
           title: parsedHtml.title || undefined,
-          titleLength: parsedHtml.titleLength,
+          titleLength: parsedHtml.title ? parsedHtml.title.length : 0,
           metaDescription: parsedHtml.metaDescription || undefined,
-          metaDescLength: parsedHtml.metaDescLength,
+          metaDescLength: parsedHtml.metaDescription ? parsedHtml.metaDescription.length : 0,
           metaRobots: parsedHtml.metaRobots || undefined,
-          xRobotsTag: parsedHtml.xRobotsTag || undefined,
+          xRobotsTag: fetchResult.headers['x-robots-tag'] || undefined,
           h1Tags: parsedHtml.h1Tags,
-          h2Count: parsedHtml.h2Count,
-          h3Count: 0,
+          h2Count: parsedHtml.h2Tags.length,
+          h3Count: parsedHtml.h3Count,
           wordCount: parsedHtml.wordCount,
           contentHash,
           simHash,
-          isExactDuplicate: false,
-          isThinContent: parsedHtml.wordCount < 150,
-          isPossibleSoft404: false,
-          soft404Confidence: 0.0,
+          isExactDuplicate: false, // Calculated in batch duplicate clustering
+          isThinContent: parsedHtml.wordCount < 120,
+          isPossibleSoft404: soft404Result.isPossibleSoft404,
+          soft404Confidence: soft404Result.confidenceScore,
           internalInlinksCount: 0,
-          internalOutlinksCount: parsedHtml.internalOutlinksCount,
-          externalOutlinksCount: parsedHtml.externalOutlinksCount,
-          imagesCount: parsedHtml.imagesCount,
+          internalOutlinksCount: parsedHtml.internalLinks.length,
+          externalOutlinksCount: parsedHtml.externalLinks.length,
+          imagesCount: parsedHtml.images.length,
           missingAltCount: parsedHtml.missingAltCount,
           schemaTypes: parsedHtml.schemaTypes,
-          schemaStatus: parsedHtml.schemaTypes.length > 0 ? 'PARSED' : 'NO_SCHEMA',
+          schemaStatus: parsedHtml.schemaStatus,
+          openGraphJson: JSON.stringify({ ogTitle: parsedHtml.ogTitle, ogDescription: parsedHtml.ogDescription, ogImage: parsedHtml.ogImage }),
+          twitterCardJson: JSON.stringify({ twitterCard: parsedHtml.twitterCard }),
+          hreflangsJson: JSON.stringify(parsedHtml.hreflangs),
           crawlDepth: nextItem.depth,
           crawledAt: new Date().toISOString(),
         };
 
         crawledPagesBuffer.push(pageRecord);
-        frontier.markCompleted(nextItem.normalizedUrl);
+        await frontier.markCompleted(nextItem.normalizedUrl);
 
-        // Discover and enqueue outgoing links
-        for (const outlink of parsedHtml.internalOutlinksSample) {
+        // 10. Process and record full link graph (every link, no 10-link sampling)
+        for (const internalLink of parsedHtml.internalLinks) {
           try {
-            const normalizedOutlink = UrlNormalizer.resolveAndNormalize(outlink, originUrl);
+            const resolvedTarget = UrlNormalizer.resolveAndNormalize(internalLink.href, originUrl);
             discoveredLinkEdges.push({
               sourceUrl: nextItem.normalizedUrl,
-              targetUrl: outlink,
-              normalizedTarget: normalizedOutlink,
+              targetUrl: internalLink.href,
+              normalizedTarget: resolvedTarget,
+              anchorText: internalLink.anchorText,
               isInternal: true,
-              isNofollow: false,
+              isNofollow: internalLink.isNofollow,
+              rel: internalLink.rel || undefined,
             });
 
-            const nextDepth = nextItem.depth + 1;
-            const scopeCheck = UrlScopePolicy.isUrlInScope(normalizedOutlink, nextDepth, scopeConfig);
+            // Maintain UrlIdentity for link graph relationships
+            await CrawlRepository.getOrCreateUrlIdentity(websiteId, resolvedTarget, 'HTML_LINK');
 
-            if (scopeCheck.allowed && !frontier.isVisited(normalizedOutlink)) {
-              frontier.enqueue(crawlRunId, outlink, normalizedOutlink, nextDepth, 'HTML_LINK', 10, nextItem.url);
+            const nextDepth = nextItem.depth + 1;
+            const scopeCheck = UrlScopePolicy.isUrlInScope(resolvedTarget, nextDepth, scopeConfig);
+
+            if (scopeCheck.allowed && !(await frontier.isVisited(resolvedTarget))) {
+              await frontier.enqueue(internalLink.href, resolvedTarget, nextDepth, 'HTML_LINK', 10, nextItem.url);
             }
           } catch {
-            // invalid link ignore
+            // malformed target ignored
           }
         }
       }
 
-      // 5. Compute Link Graph Metrics (Inlinks, Outlinks, Click Depth, Orphan Candidates)
+      // 11. Exact Duplicate Content Grouping
+      const contentGroups = new Map<string, CrawledPageRecord[]>();
+      for (const page of crawledPagesBuffer) {
+        if (page.contentHash) {
+          const group = contentGroups.get(page.contentHash) || [];
+          group.push(page);
+          contentGroups.set(page.contentHash, group);
+        }
+      }
+
+      for (const [hash, group] of contentGroups.entries()) {
+        if (group.length > 1) {
+          for (const page of group) {
+            page.isExactDuplicate = true;
+            page.duplicateClusterId = `dup-cluster-${hash.substring(0, 8)}`;
+          }
+        }
+      }
+
+      // 12. Complete Link Graph Resolution & Broken Link Status Detection
+      const allCrawledMap = new Map<string, CrawledPageRecord>();
+      for (const p of crawledPagesBuffer) {
+        allCrawledMap.set(p.normalizedUrl, p);
+      }
+
       const allKnownUrls = crawledPagesBuffer.map((p) => p.normalizedUrl);
       const graphNodes = LinkGraphBuilder.computeGraphMetrics(discoveredLinkEdges, [normalizedSeed], allKnownUrls);
 
@@ -306,16 +389,17 @@ export class CrawlCoordinator {
           page.crawlDepth = node.crawlDepth;
         }
 
-        // 6. Detect Technical Issues per Page
-        const evaluatedIssues = TechnicalIssueDetector.detectIssues({
+        // 13. Canonical Technical Issue Detection
+        const evaluatedIssues = ExpandedTechnicalIssueDetector.detectIssues({
           url: page.url,
           statusCode: page.statusCode,
           title: page.title,
           metaDescription: page.metaDescription,
           h1Tags: page.h1Tags,
-          h2Count: page.h2Count,
           wordCount: page.wordCount,
           isIndexable: page.isIndexable,
+          metaRobots: page.metaRobots,
+          xRobotsTag: page.xRobotsTag,
           canonicalUrl: page.canonicalUrl,
           canonicalMatch: page.canonicalMatch,
           redirectCount: page.redirectCount,
@@ -324,6 +408,8 @@ export class CrawlCoordinator {
           schemaStatus: page.schemaStatus,
           schemaTypes: page.schemaTypes,
           isExactDuplicate: page.isExactDuplicate,
+          isPossibleSoft404: page.isPossibleSoft404,
+          soft404Confidence: page.soft404Confidence,
           isOrphanCandidate: node?.isOrphanCandidate,
           crawlDepth: page.crawlDepth,
         });
@@ -345,12 +431,35 @@ export class CrawlCoordinator {
         }
       }
 
-      // 7. Persist Crawled Pages, Issues, and Edges
-      await CrawlRepository.saveCrawledPagesBatch(crawlRunId, websiteId, crawledPagesBuffer);
-      await CrawlRepository.saveIssuesBatch(crawlRunId, detectedIssuesBuffer);
-      await CrawlRepository.saveLinkEdgesBatch(
-        crawlRunId,
-        discoveredLinkEdges.map((e) => ({
+      // 14. Broken Internal Link Resolution
+      const linkEdgeRecords: InternalLinkEdgeRecord[] = discoveredLinkEdges.map((e, idx) => {
+        const targetPage = allCrawledMap.get(e.normalizedTarget);
+        const targetStatus = targetPage ? targetPage.statusCode : undefined;
+        const isBroken = targetStatus ? targetStatus >= 400 : false;
+
+        if (isBroken) {
+          detectedIssuesBuffer.push({
+            id: `issue-broken-link-${idx}`,
+            crawlRunId,
+            ruleKey: 'RULE_BROKEN_INTERNAL_LINK',
+            ruleVersion: ExpandedTechnicalIssueDetector.VERSION,
+            type: 'BROKEN_INTERNAL_LINK',
+            severity: 'HIGH',
+            message: `Internal link from ${e.sourceUrl} targets broken URL (${targetStatus})`,
+            evidence: JSON.stringify({
+              sourceUrl: e.sourceUrl,
+              targetUrl: e.targetUrl,
+              anchorText: e.anchorText,
+              targetStatusCode: targetStatus,
+            }),
+            impact: 'Wastes crawl budget and disrupts user navigation.',
+            resolved: false,
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        return {
+          id: `edge-${idx + 1}`,
           crawlRunId,
           sourceUrl: e.sourceUrl,
           targetUrl: e.targetUrl,
@@ -359,17 +468,24 @@ export class CrawlCoordinator {
           isInternal: e.isInternal,
           rel: e.rel,
           isNofollow: e.isNofollow,
-          isBroken: false,
+          targetStatusCode: targetStatus,
+          isBroken,
           createdAt: new Date().toISOString(),
-        }))
-      );
+        };
+      });
 
-      // 8. Historical Snapshot Comparison & SEO Event Generation
+      // 15. Persist Pages, Issues, Link Edges to Repository
+      await CrawlRepository.saveCrawledPagesBatch(crawlRunId, websiteId, crawledPagesBuffer);
+      await CrawlRepository.saveIssuesBatch(crawlRunId, detectedIssuesBuffer);
+      await CrawlRepository.saveLinkEdgesBatch(crawlRunId, linkEdgeRecords);
+
+      // 16. Historical Snapshot Comparison & SEO Event Generation
       const previousRuns = await CrawlRepository.listCrawlRuns(websiteId);
-      const lastCompleted = previousRuns.find((r) => r.id !== crawlRunId && r.status === 'COMPLETED');
+      const lastCompleted = previousRuns.find((r) => r.id !== crawlRunId && (r.status === 'COMPLETED' || r.status === 'COMPLETED_WITH_ERRORS'));
 
       if (lastCompleted) {
-        const previousPages = await CrawlRepository.getCrawledPages(lastCompleted.id);
+        const previousPagesResult = await CrawlRepository.getCrawledPages(lastCompleted.id, { limit: 10000 });
+        const previousPages = previousPagesResult.pages;
         const currSnapshots: CrawledPageSnapshot[] = crawledPagesBuffer.map((p) => ({
           url: p.url,
           normalizedUrl: p.normalizedUrl,
@@ -418,15 +534,18 @@ export class CrawlCoordinator {
         }
       }
 
-      // 9. Mark Crawl Run Complete
+      // 17. Final Status Determination
+      const terminalStatus = hadFetchErrors ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED';
       const durationMs = Date.now() - startTime;
+      const allFrontierItems = await frontier.getAllItems();
+
       await CrawlRepository.updateCrawlRun(crawlRunId, {
-        status: 'COMPLETED',
+        status: terminalStatus,
         completedAt: new Date().toISOString(),
         durationMs,
         totalPages: crawledPagesBuffer.length,
         totalIssues: detectedIssuesBuffer.length,
-        urlsDiscovered: frontier.getAllItems().length,
+        urlsDiscovered: allFrontierItems.length,
         urlsFetched: crawledPagesBuffer.length,
         sitemapsDiscovered,
       });
@@ -438,7 +557,7 @@ export class CrawlCoordinator {
         totalPages: crawledPagesBuffer.length,
         totalIssues: detectedIssuesBuffer.length,
         durationMs,
-        status: 'COMPLETED',
+        status: terminalStatus,
       };
     } catch (err: any) {
       await CrawlRepository.updateCrawlRun(crawlRunId, {

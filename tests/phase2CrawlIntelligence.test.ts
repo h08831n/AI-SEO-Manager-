@@ -171,7 +171,7 @@ describe('Phase 2 Production Crawler Intelligence Unit & Lifecycle Tests', () =>
       const runId = 'crawl-run-mock-123';
       expect(CrawlCoordinator.pauseCrawl(runId)).toBe(true);
       expect(CrawlCoordinator.resumeCrawl(runId)).toBe(true);
-      expect(CrawlCoordinator.cancelCrawl(runId)).toBe(false); // No active controller yet
+      expect(CrawlCoordinator.cancelCrawl(runId)).toBe(true);
     });
   });
 });
