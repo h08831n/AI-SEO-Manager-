@@ -1,5 +1,5 @@
 // Prisma Schema for Autonomous SEO Operating System
-// Target: PostgreSQL (with timeseries, multi-tenant isolation, and partition-ready indices)
+// Target: PostgreSQL (with timeseries, multi-tenant isolation, versioning, and partition-ready indices)
 
 generator client {
   provider = "prisma-client-js"
@@ -12,7 +12,9 @@ datasource db {
 enum UserRole {
   OWNER
   ADMIN
-  OPERATOR
+  SEO_MANAGER
+  EDITOR
+  ANALYST
   VIEWER
 }
 
@@ -35,19 +37,22 @@ enum IntegrationStatus {
 }
 
 enum ActionStatus {
-  RECOMMENDATION_ONLY
-  DRY_RUN_PENDING
-  DRY_RUN_COMPLETED
-  APPROVAL_REQUIRED
-  APPROVED
-  SCHEDULED
+  RECOMMENDED
+  PENDING_APPROVAL
+  DRY_RUN
+  DRY_RUN_VALIDATED
   EXECUTING
-  EXECUTED_VERIFYING
-  VERIFIED_SUCCESS
-  VERIFIED_REGRESSED
+  AWAITING_VERIFICATION
+  VERIFIED_COMPLETED
   FAILED
-  REVERTED
-  DISMISSED
+  BLOCKED
+  UNVERIFIED_BLOCKED
+  ROLLBACK_PENDING
+  REVERTED_RESTORED
+  // Compatibility aliases
+  RECOMMENDATION_ONLY
+  SIMULATION_ONLY
+  BLOCKED_NO_INTEGRATION
 }
 
 enum AutomationRiskLevel {
@@ -65,60 +70,108 @@ enum IssueSeverity {
   INFO
 }
 
-model Workspace {
-  id          String    @id @default(uuid())
-  name        String
-  slug        String    @unique
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+}
 
-  users       User[]
+// ----------------------------------------------------
+// Multi-Tenancy & RBAC Models
+// ----------------------------------------------------
+
+model Workspace {
+  id          String            @id @default(uuid())
+  name        String
+  slug        String            @unique
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  members     WorkspaceMember[]
   websites    Website[]
+  auditLogs   AuditLog[]
 
   @@map("workspaces")
 }
 
 model User {
+  id          String            @id @default(uuid())
+  email       String            @unique
+  name        String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  memberships WorkspaceMember[]
+  auditLogs   AuditLog[]
+
+  @@map("users")
+}
+
+model WorkspaceMember {
   id          String    @id @default(uuid())
   workspaceId String
-  email       String    @unique
-  name        String
-  role        UserRole  @default(OPERATOR)
+  userId      String
+  role        UserRole  @default(VIEWER)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  auditLogs   AuditLog[]
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([workspaceId])
-  @@map("users")
+  @@unique([workspaceId, userId])
+  @@index([workspaceId, role])
+  @@index([userId])
+  @@map("workspace_members")
 }
 
 model Website {
-  id              String    @id @default(uuid())
-  workspaceId     String
-  domain          String
-  name            String
-  productionUrl   String
-  sitemapUrl      String?
-  defaultLanguage String    @default("en-US")
-  industry        String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id               String              @id @default(uuid())
+  workspaceId      String
+  domain           String
+  name             String
+  productionUrl    String
+  sitemapUrl       String?
+  defaultLanguage  String              @default("en-US")
+  industry         String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
 
-  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  integrations    Integration[]
-  crawlRuns       CrawlRun[]
-  crawledPages    CrawledPage[]
-  recommendations SeoRecommendation[]
-  tasks           SeoTask[]
-  topicClusters   TopicCluster[]
-  auditLogs       AuditLog[]
+  workspace        Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  settings         WebsiteSettings?
+  integrations     Integration[]
+  crawlRuns        CrawlRun[]
+  crawledPages     CrawledPage[]
+  recommendations  SeoRecommendation[]
+  tasks            SeoTask[]
+  actionExecutions ActionExecution[]
+  topicClusters    TopicCluster[]
+  auditLogs        AuditLog[]
+  jobRuns          JobRun[]
 
   @@unique([workspaceId, domain])
   @@index([workspaceId])
   @@map("websites")
 }
+
+model WebsiteSettings {
+  id                    String              @id @default(uuid())
+  websiteId             String              @unique
+  crawlFrequencyHours   Int                 @default(24)
+  autoExecuteRiskLevel  AutomationRiskLevel @default(LEVEL_0_SUGGESTION_ONLY)
+  targetGeo             String              @default("GLOBAL")
+  primarySearchEngine   String              @default("google")
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  website               Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@map("website_settings")
+}
+
+// ----------------------------------------------------
+// Integrations
+// ----------------------------------------------------
 
 model Integration {
   id                   String              @id @default(uuid())
@@ -138,6 +191,10 @@ model Integration {
   @@index([websiteId])
   @@map("integrations")
 }
+
+// ----------------------------------------------------
+// Technical Crawl & Issues
+// ----------------------------------------------------
 
 model CrawlRun {
   id              String        @id @default(uuid())
@@ -213,6 +270,10 @@ model CrawlIssue {
   @@map("crawl_issues")
 }
 
+// ----------------------------------------------------
+// Analytics & Timeseries
+// ----------------------------------------------------
+
 model SearchAnalyticsDaily {
   id          String   @id @default(uuid())
   websiteId   String
@@ -232,6 +293,10 @@ model SearchAnalyticsDaily {
   @@index([websiteId, page])
   @@map("search_analytics_daily")
 }
+
+// ----------------------------------------------------
+// Topical Authority & Knowledge
+// ----------------------------------------------------
 
 model TopicCluster {
   id            String         @id @default(uuid())
@@ -267,26 +332,98 @@ model TopicSubtopic {
   @@map("topic_subtopics")
 }
 
-model SeoRecommendation {
-  id              String              @id @default(uuid())
-  websiteId       String
-  title           String
-  category        String
-  actionType      String
-  evidence        String
-  source          String
-  confidenceScore Float               @default(0.8)
-  impactScore     Int                 @default(5)
-  effortScore     Int                 @default(5)
-  riskScore       Int                 @default(3)
-  businessValue   Int                 @default(5)
-  automationLevel AutomationRiskLevel @default(LEVEL_1_SAFE_AUTOMATION)
-  status          ActionStatus        @default(RECOMMENDATION_ONLY)
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+// ----------------------------------------------------
+// Rule & Scoring Versioning
+// ----------------------------------------------------
 
-  website         Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  tasks           SeoTask[]
+model RuleDefinition {
+  id          String        @id @default(uuid())
+  ruleKey     String        @unique
+  name        String
+  category    String
+  description String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  versions    RuleVersion[]
+
+  @@map("rule_definitions")
+}
+
+model RuleVersion {
+  id               String         @id @default(uuid())
+  ruleDefinitionId String
+  version          String         // e.g. 1.0.0
+  severity         IssueSeverity  @default(MEDIUM)
+  logicConfigJson  String         // Serialized rule parameter definitions
+  isActive         Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+
+  ruleDefinition   RuleDefinition @relation(fields: [ruleDefinitionId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleDefinitionId, version])
+  @@index([ruleDefinitionId, isActive])
+  @@map("rule_versions")
+}
+
+model ScoringProfile {
+  id          String                  @id @default(uuid())
+  name        String                  @unique
+  description String?
+  isDefault   Boolean                 @default(false)
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  versions    ScoringProfileVersion[]
+
+  @@map("scoring_profiles")
+}
+
+model ScoringProfileVersion {
+  id                      String         @id @default(uuid())
+  scoringProfileId        String
+  version                 String         // e.g. 1.0.0
+  weightsJson             String         // Serialized factor weights
+  normalizationConfigJson String         // Normalization parameters
+  missingDataBehavior     String         @default("FALLBACK_TO_ZERO")
+  isActive                Boolean        @default(true)
+  createdAt               DateTime       @default(now())
+
+  scoringProfile          ScoringProfile @relation(fields: [scoringProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([scoringProfileId, version])
+  @@index([scoringProfileId, isActive])
+  @@map("scoring_profile_versions")
+}
+
+// ----------------------------------------------------
+// Recommendations & Tasks
+// ----------------------------------------------------
+
+model SeoRecommendation {
+  id                     String              @id @default(uuid())
+  websiteId              String
+  title                  String
+  category               String
+  actionType             String
+  evidence               String
+  source                 String
+  ruleKey                String?
+  ruleVersion            String?
+  scoringProfileVersion  String?
+  confidenceScore        Float               @default(0.8)
+  impactScore            Int                 @default(5)
+  effortScore            Int                 @default(5)
+  riskScore              Int                 @default(3)
+  businessValue          Int                 @default(5)
+  automationLevel        AutomationRiskLevel @default(LEVEL_1_SAFE_AUTOMATION)
+  status                 ActionStatus        @default(RECOMMENDED)
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+
+  website                Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  tasks                  SeoTask[]
+  actionExecutions       ActionExecution[]
 
   @@index([websiteId, status])
   @@map("seo_recommendations")
@@ -301,7 +438,7 @@ model SeoTask {
   priority           String              @default("MEDIUM") // CRITICAL, HIGH, MEDIUM, LOW
   opportunityScore   Float               @default(50.0)
   automationLevel    AutomationRiskLevel @default(LEVEL_1_SAFE_AUTOMATION)
-  status             ActionStatus        @default(RECOMMENDATION_ONLY)
+  status             ActionStatus        @default(RECOMMENDED)
   reason             String
   evidence           String
   affectedUrls       String[]            @default([])
@@ -318,14 +455,71 @@ model SeoTask {
 
   website            Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   recommendation     SeoRecommendation?  @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
+  actionExecutions   ActionExecution[]
   auditLogs          AuditLog[]
 
   @@index([websiteId, status])
   @@map("seo_tasks")
 }
 
+// ----------------------------------------------------
+// Action Execution & Action Verification (Dedicated Models)
+// ----------------------------------------------------
+
+model ActionExecution {
+  id                  String               @id @default(uuid())
+  websiteId           String
+  taskId              String?
+  recommendationId    String?
+  actionType          String
+  targetUrl           String
+  idempotencyKey      String               @unique
+  requestedByUserId   String?
+  approvalId          String?
+  state               ActionStatus         @default(RECOMMENDED)
+  attemptCount        Int                  @default(0)
+  beforeEvidenceJson  String?
+  afterEvidenceJson   String?
+  failureReason       String?
+  executedAt          DateTime?
+  verifiedAt          DateTime?
+  rollbackExecutionId String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  website             Website              @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  task                SeoTask?             @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  recommendation      SeoRecommendation?   @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
+  verifications       ActionVerification[]
+
+  @@index([websiteId, state])
+  @@index([idempotencyKey])
+  @@map("action_executions")
+}
+
+model ActionVerification {
+  id                 String          @id @default(uuid())
+  actionExecutionId  String
+  status             ActionStatus    @default(AWAITING_VERIFICATION)
+  expectedStateJson  String
+  observedStateJson  String?
+  isMatch            Boolean         @default(false)
+  varianceNotes      String?
+  verifiedAt         DateTime?
+  createdAt          DateTime        @default(now())
+
+  actionExecution    ActionExecution @relation(fields: [actionExecutionId], references: [id], onDelete: Cascade)
+
+  @@index([actionExecutionId, status])
+  @@map("action_verifications")
+}
+
+// ----------------------------------------------------
+// Immutable Audit Logging
+// ----------------------------------------------------
+
 model AuditLog {
-  id          String   @id @default(uuid())
+  id          String     @id @default(uuid())
   workspaceId String
   websiteId   String?
   userId      String?
@@ -333,52 +527,65 @@ model AuditLog {
   action      String
   entityType  String
   entityId    String
-  beforeState String?  // JSON string
-  afterState  String?  // JSON string
-  provenance  String   @default("USER_PROVIDED")
+  beforeState String?    // JSON string
+  afterState  String?    // JSON string
+  provenance  String     @default("SYSTEM")
   ipAddress   String?
-  timestamp   DateTime @default(now())
+  timestamp   DateTime   @default(now())
 
-  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  website     Website? @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  task        SeoTask? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  // Note: ON DELETE RESTRICT prevents cascading removal of immutable audit history
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  user        User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  website     Website?   @relation(fields: [websiteId], references: [id], onDelete: SetNull)
+  task        SeoTask?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, timestamp])
   @@index([websiteId, timestamp])
   @@map("audit_logs")
 }
 
+// ----------------------------------------------------
+// Asynchronous Job Queue & Outbox Pattern
+// ----------------------------------------------------
+
 model JobRun {
-  id           String    @id @default(uuid())
-  queueName    String
-  jobName      String
-  jobId        String?
-  payloadJson  String?
-  status       String    @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED, RETRYING
-  attempts     Int       @default(0)
-  maxAttempts  Int       @default(3)
-  errorMessage String?
-  startedAt    DateTime?
-  completedAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id                String    @id @default(uuid())
+  websiteId         String?
+  requestedByUserId String?
+  queueName         String
+  jobName           String
+  jobId             String?
+  payloadJson       String?
+  status            String    @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED
+  progressPct       Int       @default(0)
+  attempts          Int       @default(0)
+  maxAttempts       Int       @default(3)
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  website           Website?  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
 
   @@index([queueName, status])
+  @@index([websiteId, status])
   @@map("job_runs")
 }
 
 model OutboxEvent {
-  id            String    @id @default(uuid())
+  id            String       @id @default(uuid())
   aggregateType String
   aggregateId   String
   eventType     String
   payloadJson   String
-  status        String    @default("PENDING") // PENDING, PUBLISHED, FAILED
-  retryCount    Int       @default(0)
-  errorMessage  String?
-  publishedAt   DateTime?
-  createdAt     DateTime  @default(now())
+  status        OutboxStatus @default(PENDING)
+  attemptCount  Int          @default(0)
+  lastError     String?
+  nextAttemptAt DateTime?
+  deliveredAt   DateTime?
+  createdAt     DateTime     @default(now())
 
-  @@index([status, createdAt])
+  @@index([status, nextAttemptAt, createdAt])
   @@map("outbox_events")
 }
