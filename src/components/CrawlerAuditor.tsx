@@ -47,28 +47,35 @@ export const CrawlerAuditor: React.FC<CrawlerAuditorProps> = ({
     try {
       const data = await crawlUrl(liveUrlInput.trim());
       setLiveCrawlResult(data);
-      if (onAddCrawledUrl && data.url) {
-        // Convert to CrawledUrl format if needed
+      const targetUrl = data.finalUrl || data.requestedUrl;
+      if (onAddCrawledUrl && targetUrl) {
+        let pathname = '/';
+        try {
+          pathname = new URL(targetUrl).pathname;
+        } catch {
+          pathname = targetUrl;
+        }
+
         const newCrawledUrl: CrawledUrl = {
-          url: data.url,
-          path: new URL(data.url).pathname,
-          status: data.status,
-          loadTimeMs: data.loadTimeMs,
+          url: targetUrl,
+          path: pathname,
+          status: data.statusCode || 200,
+          loadTimeMs: data.loadTimeMs || 0,
           isIndexable: data.isIndexable,
-          canonical: data.canonical,
-          canonicalSelfReferential: data.canonical === data.url,
-          title: data.title,
-          metaDescription: data.metaDescription,
-          metaRobots: data.metaRobots,
-          h1: data.h1 || [],
+          canonical: data.canonicalUrl || targetUrl,
+          canonicalSelfReferential: (data.canonicalUrl || targetUrl) === targetUrl,
+          title: data.title || '',
+          metaDescription: data.metaDescription || '',
+          metaRobots: data.metaRobots || 'index, follow',
+          h1: data.h1Tags || [],
           h2Count: data.h2Count || 0,
           wordCount: data.wordCount || 0,
-          schemaTypes: (data.schemas || []).map((s: any) => s['@type'] || 'Custom'),
-          internalInlinks: data.internalLinksCount || 0,
-          internalOutlinks: data.sampleLinks?.length || 0,
-          externalLinks: data.externalLinksCount || 0,
-          imagesCount: data.totalImages || 0,
-          missingAltCount: data.imagesWithoutAlt || 0,
+          schemaTypes: data.schemaTypes || [],
+          internalInlinks: 0,
+          internalOutlinks: data.internalOutlinksCount || 0,
+          externalLinks: data.externalOutlinksCount || 0,
+          imagesCount: data.imagesCount || 0,
+          missingAltCount: data.missingAltCount || 0,
           isOrphan: false,
           clickDepth: 1,
           lastCrawled: data.crawledAt,
@@ -78,7 +85,7 @@ export const CrawlerAuditor: React.FC<CrawlerAuditorProps> = ({
             type: i.type,
             severity: i.severity,
             message: i.message,
-            impact: 'Evaluated from live server response',
+            impact: i.impact || 'Evaluated from live server response',
           })),
         };
         onAddCrawledUrl(newCrawledUrl);

@@ -22,6 +22,33 @@ export const TopicalAuthorityGraph: React.FC<TopicalAuthorityGraphProps> = ({
 
   const selectedCluster = clusters.find((c) => c.id === selectedClusterId) || clusters[0];
 
+  const getLiveArticles = (cluster: TopicCluster) => {
+    if (cluster.supportingArticles) return cluster.supportingArticles;
+    if (cluster.subtopics) {
+      return cluster.subtopics
+        .filter((s) => s.status === 'PUBLISHED')
+        .map((s) => ({
+          title: s.name,
+          url: s.url || `${cluster.pillarUrl}/${s.id}`,
+          internalInlinksFromPillar: s.internalInlinksFromPillar ?? true,
+        }));
+    }
+    return [];
+  };
+
+  const getMissingSubtopics = (cluster: TopicCluster) => {
+    if (cluster.missingSubtopics) return cluster.missingSubtopics;
+    if (cluster.subtopics) {
+      return cluster.subtopics
+        .filter((s) => s.status === 'GAP' || s.status === 'PLANNED' || s.status === 'DRAFT')
+        .map((s) => s.name);
+    }
+    return [];
+  };
+
+  const selectedLiveArticles = selectedCluster ? getLiveArticles(selectedCluster) : [];
+  const selectedMissingSubtopics = selectedCluster ? getMissingSubtopics(selectedCluster) : [];
+
   return (
     <div className="space-y-6">
       {/* Header Banner */}
@@ -44,6 +71,8 @@ export const TopicalAuthorityGraph: React.FC<TopicalAuthorityGraphProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {clusters.map((cluster) => {
           const isSelected = cluster.id === selectedCluster.id;
+          const liveArts = getLiveArticles(cluster);
+          const missingNodes = getMissingSubtopics(cluster);
           return (
             <div
               key={cluster.id}
@@ -68,8 +97,8 @@ export const TopicalAuthorityGraph: React.FC<TopicalAuthorityGraphProps> = ({
               </div>
 
               <div className="mt-3 flex items-center justify-between text-xs text-slate-400 font-mono">
-                <span>{cluster.supportingArticles.length} Live Articles</span>
-                <span className="text-amber-400">{cluster.missingSubtopics.length} Missing Nodes</span>
+                <span>{liveArts.length} Live Articles</span>
+                <span className="text-amber-400">{missingNodes.length} Missing Nodes</span>
               </div>
             </div>
           );
@@ -96,11 +125,11 @@ export const TopicalAuthorityGraph: React.FC<TopicalAuthorityGraphProps> = ({
           <div className="space-y-3">
             <div className="flex items-center space-x-2 text-xs font-bold text-emerald-300 uppercase tracking-wider">
               <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              <span>Existing Supporting Articles ({selectedCluster.supportingArticles.length})</span>
+              <span>Existing Supporting Articles ({selectedLiveArticles.length})</span>
             </div>
 
             <div className="space-y-2">
-              {selectedCluster.supportingArticles.map((art, idx) => (
+              {selectedLiveArticles.map((art, idx) => (
                 <div key={idx} className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs">
                   <div>
                     <span className="font-semibold text-slate-200 block">{art.title}</span>
@@ -123,7 +152,7 @@ export const TopicalAuthorityGraph: React.FC<TopicalAuthorityGraphProps> = ({
             </div>
 
             <div className="space-y-2">
-              {selectedCluster.missingSubtopics.map((subtopic, idx) => (
+              {selectedMissingSubtopics.map((subtopic, idx) => (
                 <div key={idx} className="p-3 bg-slate-950 rounded-lg border border-amber-950/60 flex items-center justify-between text-xs">
                   <div>
                     <span className="font-semibold text-slate-200 block">{subtopic}</span>

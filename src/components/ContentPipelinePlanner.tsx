@@ -53,11 +53,11 @@ export const ContentPipelinePlanner: React.FC<ContentPipelinePlannerProps> = ({
         content: `<!-- Auto generated from AI SEO Manager -->\n<h1>${item.title}</h1>\n<p>Targeting keyword: ${item.primaryKeyword}</p>`,
         status: 'draft',
       });
-      setWpSyncMessage(`Draft successfully synced to WordPress (ID: ${res.post_id})`);
-      setTimeout(() => setWpSyncMessage(null), 3000);
+      setWpSyncMessage(res.message || 'WordPress payload preview generated.');
+      setTimeout(() => setWpSyncMessage(null), 4000);
     } catch (err: any) {
       setWpSyncMessage(`WordPress sync failed: ${err.message}`);
-      setTimeout(() => setWpSyncMessage(null), 3000);
+      setTimeout(() => setWpSyncMessage(null), 4000);
     }
   };
 

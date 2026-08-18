@@ -177,13 +177,18 @@ export interface CannibalizationCase {
   id: string;
   query: string;
   intent: 'Informational' | 'Commercial' | 'Transactional';
+  severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  contentSimilarityScore?: number;
+  reason?: string;
   competingUrls: Array<{
     url: string;
     position: number;
+    avgPosition?: number;
     clicks: number;
     impressions: number;
     title: string;
     contentSimilarityScore: number;
+    trafficShare?: number;
   }>;
   intentCollisionSummary: string;
   recommendedStrategy: 'MERGE' | 'CANONICALIZE' | 'REDIRECT' | 'DIFFERENTIATE_INTENT' | 'INTERNAL_LINK_HIERARCHY';
@@ -222,7 +227,14 @@ export interface TopicCluster {
     status: 'PUBLISHED' | 'PLANNED' | 'DRAFT' | 'GAP';
     url?: string;
     entities: string[];
+    internalInlinksFromPillar?: boolean;
   }>;
+  supportingArticles?: Array<{
+    title: string;
+    url: string;
+    internalInlinksFromPillar: boolean;
+  }>;
+  missingSubtopics?: string[];
 }
 
 export interface CompetitorGapItem {
@@ -303,13 +315,21 @@ export interface ContentPlanItem {
 export interface SEOExperiment {
   id: string;
   name: string;
-  targetUrl: string;
-  elementTested: 'Title Tag' | 'Meta Description' | 'H1 & Headings' | 'Schema FAQ' | 'Internal Link Cluster';
+  title?: string;
+  targetUrl?: string;
+  targetUrls?: string[];
+  controlUrls?: string[];
+  elementTested?: 'Title Tag' | 'Meta Description' | 'H1 & Headings' | 'Schema FAQ' | 'Internal Link Cluster' | string;
+  type?: string;
   hypothesis: string;
-  originalValue: string;
-  testValue: string;
-  startDate: string;
+  originalValue?: string;
+  testValue?: string;
+  startDate?: string;
   endDate?: string;
+  testDurationDays?: number;
+  confidenceLevel?: number;
+  measuredLiftPct?: number;
+  learningLog?: string;
   status: 'RUNNING' | 'CONCLUDED' | 'REVERTED';
   results?: {
     baselineCtr: number;
@@ -329,6 +349,7 @@ export interface SEOExperiment {
 export interface SEOTask {
   id: string;
   title: string;
+  description?: string;
   category: 'TECHNICAL' | 'ON_PAGE' | 'CONTENT' | 'INTERNAL_LINKS' | 'SCHEMA' | 'SPEED';
   reason: string;
   evidence: string;

@@ -2,13 +2,8 @@ import React, { useState } from 'react';
 import { SEOExperiment } from '../types';
 import {
   Activity,
-  CheckCircle2,
-  Clock,
-  TrendingUp,
-  ArrowUpRight,
   PlusCircle,
-  Sparkles,
-  BarChart2,
+  ArrowUpRight,
 } from 'lucide-react';
 
 interface ExperimentsHubProps {
@@ -17,12 +12,12 @@ interface ExperimentsHubProps {
 }
 
 export const ExperimentsHub: React.FC<ExperimentsHubProps> = ({
-  experiments,
+  experiments = [],
   onCreateExperiment,
 }) => {
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'RUNNING' | 'CONCLUDED'>('ALL');
 
-  const filteredExperiments = experiments.filter((exp) => {
+  const filteredExperiments = (experiments || []).filter((exp) => {
     return statusFilter === 'ALL' || exp.status === statusFilter;
   });
 
@@ -45,7 +40,7 @@ export const ExperimentsHub: React.FC<ExperimentsHubProps> = ({
 
         <button
           onClick={onCreateExperiment}
-          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 shadow transition-all shrink-0"
+          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 shadow transition-all shrink-0 cursor-pointer"
         >
           <PlusCircle className="h-4 w-4" />
           <span>Launch New SEO Experiment</span>
@@ -56,7 +51,7 @@ export const ExperimentsHub: React.FC<ExperimentsHubProps> = ({
       <div className="flex items-center space-x-2 border-b border-slate-800 pb-2">
         <button
           onClick={() => setStatusFilter('ALL')}
-          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
             statusFilter === 'ALL'
               ? 'bg-slate-800 text-emerald-400 border border-slate-700'
               : 'text-slate-400 hover:text-slate-200'
@@ -66,7 +61,7 @@ export const ExperimentsHub: React.FC<ExperimentsHubProps> = ({
         </button>
         <button
           onClick={() => setStatusFilter('RUNNING')}
-          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
             statusFilter === 'RUNNING'
               ? 'bg-slate-800 text-emerald-400 border border-slate-700'
               : 'text-slate-400 hover:text-slate-200'
@@ -76,7 +71,7 @@ export const ExperimentsHub: React.FC<ExperimentsHubProps> = ({
         </button>
         <button
           onClick={() => setStatusFilter('CONCLUDED')}
-          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
             statusFilter === 'CONCLUDED'
               ? 'bg-slate-800 text-emerald-400 border border-slate-700'
               : 'text-slate-400 hover:text-slate-200'
@@ -88,80 +83,116 @@ export const ExperimentsHub: React.FC<ExperimentsHubProps> = ({
 
       {/* Experiments Cards */}
       <div className="space-y-4">
-        {filteredExperiments.map((exp) => (
-          <div
-            key={exp.id}
-            className="bg-slate-900 p-6 rounded-xl border border-slate-800 hover:border-slate-700 transition-all space-y-4"
-          >
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={`text-[10px] px-2.5 py-0.5 rounded font-mono font-bold uppercase ${
-                      exp.status === 'CONCLUDED'
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                    }`}
-                  >
-                    {exp.status} ({exp.testDurationDays} Days Test)
-                  </span>
-
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
-                    Hypothesis Type: {exp.type}
-                  </span>
-
-                  {exp.confidenceLevel && (
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
-                      {exp.confidenceLevel}% Statistical Confidence
-                    </span>
-                  )}
-                </div>
-
-                <h3 className="text-base font-bold text-white mt-1">{exp.title}</h3>
-                <p className="text-xs text-slate-300">{exp.hypothesis}</p>
-              </div>
-
-              {/* Measured Lift Badge */}
-              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center sm:text-right shrink-0">
-                <span className="text-[10px] text-slate-400 uppercase font-mono block">Measured Click Lift</span>
-                <div className="text-2xl font-bold font-mono text-emerald-400 mt-0.5 flex items-center justify-center sm:justify-end">
-                  <ArrowUpRight className="h-5 w-5 mr-1" />
-                  {exp.measuredLiftPct > 0 ? `+${exp.measuredLiftPct}%` : `${exp.measuredLiftPct}%`}
-                </div>
-                <span className="text-[10px] text-slate-400 font-mono">Controlled vs Baseline</span>
-              </div>
-            </div>
-
-            {/* Test Group URLs vs Controls */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-slate-950 p-3.5 rounded-lg border border-slate-800/80 font-mono">
-              <div>
-                <span className="text-[10px] text-emerald-400 uppercase font-bold">Variant Test URLs (Group A)</span>
-                <ul className="list-disc list-inside text-slate-300 space-y-0.5 mt-1">
-                  {exp.targetUrls.map((u, i) => (
-                    <li key={i} className="truncate">{u}</li>
-                  ))}
-                </ul>
-              </div>
-
-              <div>
-                <span className="text-[10px] text-slate-400 uppercase font-bold">Control Benchmark Group (Group B)</span>
-                <ul className="list-disc list-inside text-slate-400 space-y-0.5 mt-1">
-                  {exp.controlUrls.map((u, i) => (
-                    <li key={i} className="truncate">{u}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-
-            {/* Structured Learnings Log */}
-            {exp.learningLog && (
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs">
-                <span className="font-bold text-emerald-400 block uppercase text-[10px] font-mono">Institutional SEO Learning:</span>
-                <p className="text-slate-200 mt-0.5">{exp.learningLog}</p>
-              </div>
-            )}
+        {filteredExperiments.length === 0 ? (
+          <div className="bg-slate-900 p-8 rounded-xl border border-slate-800 text-center text-slate-400 text-xs">
+            No experiments found for the selected filter.
           </div>
-        ))}
+        ) : (
+          filteredExperiments.map((exp) => {
+            const title = exp.title || exp.name || 'Untitled SEO Experiment';
+            const testType = exp.type || exp.elementTested || 'SEO Element Test';
+            const duration = exp.testDurationDays || 30;
+            const confidence = exp.confidenceLevel || exp.results?.confidenceScore || 95;
+            const lift =
+              exp.measuredLiftPct !== undefined
+                ? exp.measuredLiftPct
+                : exp.results?.ctrLiftPct !== undefined
+                ? exp.results.ctrLiftPct
+                : 0;
+            const targetUrls = exp.targetUrls && exp.targetUrls.length > 0
+              ? exp.targetUrls
+              : exp.targetUrl
+              ? [exp.targetUrl]
+              : [];
+            const controlUrls = exp.controlUrls && exp.controlUrls.length > 0
+              ? exp.controlUrls
+              : ['https://techscale.io/benchmarks/control-group'];
+            const learning = exp.learningLog || exp.results?.learningInsight;
+
+            return (
+              <div
+                key={exp.id}
+                className="bg-slate-900 p-6 rounded-xl border border-slate-800 hover:border-slate-700 transition-all space-y-4"
+              >
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`text-[10px] px-2.5 py-0.5 rounded font-mono font-bold uppercase ${
+                          exp.status === 'CONCLUDED'
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        }`}
+                      >
+                        {exp.status} ({duration} Days Test)
+                      </span>
+
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                        Hypothesis Type: {testType}
+                      </span>
+
+                      {confidence && (
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
+                          {confidence}% Statistical Confidence
+                        </span>
+                      )}
+                    </div>
+
+                    <h3 className="text-base font-bold text-white mt-1">{title}</h3>
+                    <p className="text-xs text-slate-300">{exp.hypothesis}</p>
+                  </div>
+
+                  {/* Measured Lift Badge */}
+                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center sm:text-right shrink-0">
+                    <span className="text-[10px] text-slate-400 uppercase font-mono block">Measured Click Lift</span>
+                    <div className="text-2xl font-bold font-mono text-emerald-400 mt-0.5 flex items-center justify-center sm:justify-end">
+                      <ArrowUpRight className="h-5 w-5 mr-1" />
+                      {lift > 0 ? `+${lift}%` : `${lift}%`}
+                    </div>
+                    <span className="text-[10px] text-slate-400 font-mono">Controlled vs Baseline</span>
+                  </div>
+                </div>
+
+                {/* Test Group URLs vs Controls */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-slate-950 p-3.5 rounded-lg border border-slate-800/80 font-mono">
+                  <div>
+                    <span className="text-[10px] text-emerald-400 uppercase font-bold">Variant Test URLs (Group A)</span>
+                    <ul className="list-disc list-inside text-slate-300 space-y-0.5 mt-1">
+                      {targetUrls.length > 0 ? (
+                        targetUrls.map((u, i) => (
+                          <li key={i} className="truncate">{u}</li>
+                        ))
+                      ) : (
+                        <li className="text-slate-500">No specific variant URLs assigned</li>
+                      )}
+                    </ul>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold">Control Benchmark Group (Group B)</span>
+                    <ul className="list-disc list-inside text-slate-400 space-y-0.5 mt-1">
+                      {controlUrls.length > 0 ? (
+                        controlUrls.map((u, i) => (
+                          <li key={i} className="truncate">{u}</li>
+                        ))
+                      ) : (
+                        <li className="text-slate-500">Synthetic control baseline</li>
+                      )}
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Structured Learnings Log */}
+                {learning && (
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs">
+                    <span className="font-bold text-emerald-400 block uppercase text-[10px] font-mono">Institutional SEO Learning:</span>
+                    <p className="text-slate-200 mt-0.5">{learning}</p>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );

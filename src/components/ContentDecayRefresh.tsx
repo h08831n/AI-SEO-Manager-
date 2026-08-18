@@ -1,17 +1,14 @@
 import React, { useState } from 'react';
 import { DecayingContentItem } from '../types';
 import { generateRefresh } from '../services/api';
+import { ContentRefreshResponse } from '../shared/contracts';
 import {
   Layers,
-  ArrowDownRight,
   Sparkles,
-  RefreshCw,
   PlusCircle,
-  Trash2,
   HelpCircle,
-  Link2,
   CheckCircle2,
-  ExternalLink,
+  ListOrdered,
 } from 'lucide-react';
 
 interface ContentDecayRefreshProps {
@@ -25,21 +22,21 @@ export const ContentDecayRefresh: React.FC<ContentDecayRefreshProps> = ({
 }) => {
   const [selectedPage, setSelectedPage] = useState<DecayingContentItem>(decayingPages[0]);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
-  const [refreshDiagnosis, setRefreshDiagnosis] = useState<any>(null);
+  const [refreshDiagnosis, setRefreshDiagnosis] = useState<ContentRefreshResponse | null>(null);
 
   const handleRunAiDiagnosis = async (page: DecayingContentItem) => {
     setIsDiagnosing(true);
     try {
-      const data = await generateRefresh(
-        page.url,
-        page.title,
-        page.dropPercentage,
-        page.peakClicks,
-        page.currentClicks
-      );
+      const data = await generateRefresh({
+        targetUrl: page.url,
+        currentTitle: page.title,
+        dropPercentage: page.dropPercentage,
+        historicalClicks: page.peakClicks,
+        currentClicks: page.currentClicks,
+      });
       setRefreshDiagnosis(data);
     } catch (err) {
-      console.error(err);
+      console.error('Refresh diagnosis error:', err);
     } finally {
       setIsDiagnosing(false);
     }
@@ -90,7 +87,9 @@ export const ContentDecayRefresh: React.FC<ContentDecayRefreshProps> = ({
                   <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
                     -{page.dropPercentage}% Drop
                   </span>
-                  <span className="text-xs text-slate-400 font-mono">Over {page.period}</span>
+                  <span className="text-xs text-slate-400 font-mono">
+                    Over {page.decayPeriod || 'Trailing 90 Days'}
+                  </span>
                 </div>
 
                 <h3 className="text-sm font-bold text-white mt-2 leading-snug">{page.title}</h3>
@@ -121,7 +120,7 @@ export const ContentDecayRefresh: React.FC<ContentDecayRefreshProps> = ({
                   <button
                     onClick={() => handleRunAiDiagnosis(selectedPage)}
                     disabled={isDiagnosing}
-                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition-all"
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition-all cursor-pointer"
                   >
                     <Sparkles className={`h-3.5 w-3.5 ${isDiagnosing ? 'animate-spin' : ''}`} />
                     <span>{isDiagnosing ? 'Generating Diagnostic...' : 'Generate AI Refresh Plan'}</span>
@@ -138,45 +137,57 @@ export const ContentDecayRefresh: React.FC<ContentDecayRefreshProps> = ({
                   <div className="p-3.5 bg-slate-950 rounded-lg border border-slate-800 text-xs">
                     <span className="text-emerald-400 font-bold font-mono text-[10px] block uppercase">Root Cause Diagnosis:</span>
                     <p className="text-slate-200 mt-1">{refreshDiagnosis.diagnosisSummary}</p>
-                    <p className="text-slate-400 mt-1 font-mono text-[11px]">Recommended Title: {refreshDiagnosis.recommendedTitle}</p>
+                    {refreshDiagnosis.proposedNewTitle && (
+                      <p className="text-slate-300 mt-2 font-mono text-[11px]">
+                        <strong className="text-emerald-400">Proposed New Title:</strong> {refreshDiagnosis.proposedNewTitle}
+                      </p>
+                    )}
+                    {refreshDiagnosis.proposedNewMetaDescription && (
+                      <p className="text-slate-400 mt-1 font-mono text-[11px]">
+                        <strong className="text-emerald-400">Proposed Meta:</strong> {refreshDiagnosis.proposedNewMetaDescription}
+                      </p>
+                    )}
                   </div>
 
-                  {/* Outdated Elements & Missing Subtopics Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="p-3.5 bg-slate-950 rounded-lg border border-rose-950/60 text-xs space-y-2">
-                      <div className="flex items-center space-x-1 text-rose-400 font-bold text-[11px] uppercase">
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span>Outdated Data to Remove/Update</span>
-                      </div>
-                      <ul className="list-disc list-inside text-slate-300 space-y-1">
-                        {refreshDiagnosis.outdatedElements?.map((item: string, i: number) => (
-                          <li key={i}>{item}</li>
-                        ))}
-                      </ul>
-                    </div>
-
+                  {/* Missing Topics Box */}
+                  {refreshDiagnosis.missingTopics && refreshDiagnosis.missingTopics.length > 0 && (
                     <div className="p-3.5 bg-slate-950 rounded-lg border border-emerald-950/60 text-xs space-y-2">
                       <div className="flex items-center space-x-1 text-emerald-400 font-bold text-[11px] uppercase">
                         <PlusCircle className="h-3.5 w-3.5" />
-                        <span>Missing Semantic Subtopics</span>
+                        <span>Missing Topics & Entities to Cover</span>
                       </div>
                       <ul className="list-disc list-inside text-slate-300 space-y-1">
-                        {refreshDiagnosis.missingSubtopics?.map((item: string, i: number) => (
+                        {refreshDiagnosis.missingTopics.map((item: string, i: number) => (
                           <li key={i}>{item}</li>
                         ))}
                       </ul>
                     </div>
-                  </div>
+                  )}
+
+                  {/* Action Plan */}
+                  {refreshDiagnosis.actionPlan && refreshDiagnosis.actionPlan.length > 0 && (
+                    <div className="p-3.5 bg-slate-950 rounded-lg border border-slate-800 text-xs space-y-2">
+                      <div className="flex items-center space-x-1 text-indigo-400 font-bold text-[11px] uppercase">
+                        <ListOrdered className="h-3.5 w-3.5" />
+                        <span>Step-by-Step Refresh Plan</span>
+                      </div>
+                      <ul className="list-decimal list-inside text-slate-300 space-y-1">
+                        {refreshDiagnosis.actionPlan.map((step: string, i: number) => (
+                          <li key={i}>{step}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   {/* FAQ Additions */}
-                  {refreshDiagnosis.recommendedFaqAdditions?.length > 0 && (
+                  {refreshDiagnosis.newFaqsToAdd && refreshDiagnosis.newFaqsToAdd.length > 0 && (
                     <div className="p-3.5 bg-slate-950 rounded-lg border border-slate-800 text-xs space-y-2">
                       <div className="flex items-center space-x-1 text-indigo-400 font-bold text-[11px] uppercase">
                         <HelpCircle className="h-3.5 w-3.5" />
                         <span>Recommended FAQ Additions (Schema Ready)</span>
                       </div>
                       <div className="space-y-2">
-                        {refreshDiagnosis.recommendedFaqAdditions.map((faq: any, i: number) => (
+                        {refreshDiagnosis.newFaqsToAdd.map((faq: any, i: number) => (
                           <div key={i} className="p-2 rounded bg-slate-900 border border-slate-800">
                             <span className="font-bold text-white block">Q: {faq.question}</span>
                             <p className="text-slate-400 text-[11px] mt-0.5">A: {faq.answer}</p>
@@ -190,7 +201,7 @@ export const ContentDecayRefresh: React.FC<ContentDecayRefreshProps> = ({
                   <div className="pt-2">
                     <button
                       onClick={() => onAddToPipeline(selectedPage, refreshDiagnosis)}
-                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center justify-center space-x-2 shadow transition-all"
+                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center justify-center space-x-2 shadow transition-all cursor-pointer"
                     >
                       <CheckCircle2 className="h-4 w-4" />
                       <span>Push Refresh Project to Content Calendar</span>
@@ -202,7 +213,7 @@ export const ContentDecayRefresh: React.FC<ContentDecayRefreshProps> = ({
                   <Sparkles className="h-8 w-8 text-emerald-400 mx-auto" />
                   <h3 className="text-sm font-bold text-white">Generate Exact Content Refresh Blueprint</h3>
                   <p className="text-xs text-slate-400 max-w-md mx-auto">
-                    Click "Generate AI Refresh Plan" above to perform deep semantic comparison against top 2026 ranking competitors and generate concrete heading, data, and FAQ updates.
+                    Click "Generate AI Refresh Plan" above to perform deep semantic comparison against top ranking competitors and generate concrete heading, data, and FAQ updates.
                   </p>
                 </div>
               )}

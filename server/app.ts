@@ -1,0 +1,100 @@
+import express, { Request, Response, NextFunction } from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
+
+import crawlRoutes from './routes/crawlRoutes';
+import copilotRoutes from './routes/copilotRoutes';
+import contentRoutes from './routes/contentRoutes';
+import websiteRoutes from './routes/websiteRoutes';
+import integrationRoutes from './routes/integrationRoutes';
+import taskRoutes from './routes/taskRoutes';
+import observabilityRoutes from './routes/observabilityRoutes';
+
+export function createApp() {
+  const app = express();
+
+  // Security Headers
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // Disabled for local Vite dev preview compatibility
+      crossOriginEmbedderPolicy: false,
+    })
+  );
+
+  // CORS
+  app.use(cors());
+
+  // Body Parsing with Bounds
+  app.use(express.json({ limit: '2mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+  // Global API Rate Limiter
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 180, // Limit each IP to 180 requests per windowMs
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      status: 'ERROR',
+      error: 'Too many requests from this IP. Please wait before retrying.',
+    },
+  });
+  app.use('/api', apiLimiter);
+
+  // Mount Modular Routes
+  app.use('/api/crawl', crawlRoutes);
+  app.use('/api/copilot', copilotRoutes);
+  app.use('/api/content', contentRoutes);
+  app.use('/api/websites', websiteRoutes);
+  app.use('/api/integrations', integrationRoutes);
+  app.use('/api/tasks', taskRoutes);
+  app.use('/api/observability', observabilityRoutes);
+
+  // Legacy route aliases for backward compatibility
+  app.post('/api/crawl', (req, res, next) => {
+    // Forward /api/crawl POST to /api/crawl/url
+    req.url = '/url';
+    crawlRoutes(req, res, next);
+  });
+  app.post('/api/generate-content-brief', (req, res, next) => {
+    req.url = '/brief';
+    contentRoutes(req, res, next);
+  });
+  app.post('/api/generate-refresh-plan', (req, res, next) => {
+    req.url = '/refresh';
+    contentRoutes(req, res, next);
+  });
+  app.post('/api/optimize-ctr', (req, res, next) => {
+    req.url = '/ctr-optimize';
+    contentRoutes(req, res, next);
+  });
+  app.post('/api/generate-schema', (req, res, next) => {
+    req.url = '/schema-generate';
+    contentRoutes(req, res, next);
+  });
+  app.post('/api/export-wordpress', (req, res, next) => {
+    req.url = '/export-wordpress';
+    integrationRoutes(req, res, next);
+  });
+  app.post('/api/export-csv', (req, res, next) => {
+    req.url = '/export-csv';
+    integrationRoutes(req, res, next);
+  });
+
+  // Health endpoint
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() });
+  });
+
+  // Global Safe Error Handler
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    console.error('Unhandled server error:', err);
+    res.status(err.status || 500).json({
+      status: 'ERROR',
+      message: err.message || 'An internal server error occurred.',
+    });
+  });
+
+  return app;
+}

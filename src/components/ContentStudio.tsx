@@ -1,16 +1,18 @@
 import React, { useState } from 'react';
 import { generateBrief } from '../services/api';
+import { ContentBriefResponse } from '../shared/contracts';
 import {
   Sparkles,
   FileText,
   CheckCircle2,
-  AlertCircle,
   Copy,
   Layers,
-  History,
-  SlidersHorizontal,
-  ExternalLink,
+  HelpCircle,
+  Link2,
+  Image as ImageIcon,
+  Tag,
   ShieldCheck,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const ContentStudio: React.FC = () => {
@@ -20,7 +22,7 @@ export const ContentStudio: React.FC = () => {
   const [searchIntent, setSearchIntent] = useState('Informational / Architectural Guide');
 
   const [isGenerating, setIsGenerating] = useState(false);
-  const [generatedBrief, setGeneratedBrief] = useState<any>(null);
+  const [generatedBrief, setGeneratedBrief] = useState<ContentBriefResponse | null>(null);
 
   // Markdown Editor States
   const [articleContent, setArticleContent] = useState<string>(`# The Pragmatic Guide to OpenTelemetry Distributed Tracing in High-Throughput Microservices
@@ -57,18 +59,22 @@ export function executeTracedCall(spanName: string, fn: Function) {
 ## 2. Head-Based vs Tail-Based Sampling Tradeoffs
 Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelemetry Collector prevents dropping error traces.`);
 
-  const [wordCount, setWordCount] = useState<number>(0);
   const [activeSubTab, setActiveSubTab] = useState<'BRIEF' | 'EDITOR' | 'EEAT_ANALYZER'>('BRIEF');
   const [copied, setCopied] = useState(false);
 
   const handleGenerateBrief = async () => {
     setIsGenerating(true);
     try {
-      const data = await generateBrief(targetKeyword, topic, targetAudience, searchIntent);
+      const data = await generateBrief({
+        targetKeyword,
+        topic,
+        targetAudience,
+        searchIntent,
+      });
       setGeneratedBrief(data);
       setActiveSubTab('BRIEF');
     } catch (err) {
-      console.error(err);
+      console.error('Brief generation error:', err);
     } finally {
       setIsGenerating(false);
     }
@@ -87,20 +93,20 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
         <div>
           <div className="flex items-center space-x-2 text-emerald-400 text-xs font-mono mb-1">
             <Sparkles className="h-4 w-4" />
-            <span>AI CONTENT STUDIO & E-E-A-T INFORMATION GAIN ENGINE</span>
+            <span>AI CONTENT STUDIO & E-E-A-T BRIEF ARCHITECT</span>
           </div>
           <h1 className="text-xl font-bold text-white tracking-tight">
-            AI Content Studio & Comprehensive Brief Generator
+            AI Content Studio & Structured Brief Generator
           </h1>
           <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-            Generate 12-dimensional SEO content briefs, enforce E-E-A-T and proprietary Information Gain benchmarks, and author technical articles with markdown versioning.
+            Generate 12-dimensional SEO content briefs, enforce E-E-A-T and Information Gain requirements, and author technical articles with markdown formatting.
           </p>
         </div>
 
         <div className="flex items-center space-x-2">
           <button
             onClick={handleCopyMarkdown}
-            className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center space-x-1.5 border border-slate-700 transition-all"
+            className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center space-x-1.5 border border-slate-700 transition-all cursor-pointer"
           >
             {copied ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
             <span>{copied ? 'Copied!' : 'Copy Markdown'}</span>
@@ -112,7 +118,7 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
       <div className="flex items-center space-x-2 border-b border-slate-800 pb-2">
         <button
           onClick={() => setActiveSubTab('BRIEF')}
-          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
             activeSubTab === 'BRIEF'
               ? 'bg-emerald-600 text-white shadow'
               : 'text-slate-400 hover:text-slate-200'
@@ -122,7 +128,7 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
         </button>
         <button
           onClick={() => setActiveSubTab('EDITOR')}
-          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
             activeSubTab === 'EDITOR'
               ? 'bg-emerald-600 text-white shadow'
               : 'text-slate-400 hover:text-slate-200'
@@ -132,13 +138,13 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
         </button>
         <button
           onClick={() => setActiveSubTab('EEAT_ANALYZER')}
-          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
             activeSubTab === 'EEAT_ANALYZER'
               ? 'bg-emerald-600 text-white shadow'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          E-E-A-T & Information Gain Score (92/100)
+          E-E-A-T Framework [Demo Fixture]
         </button>
       </div>
 
@@ -194,7 +200,7 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
             <button
               onClick={handleGenerateBrief}
               disabled={isGenerating}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center justify-center space-x-2 shadow transition-all"
+              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center justify-center space-x-2 shadow transition-all cursor-pointer"
             >
               <Sparkles className={`h-4 w-4 ${isGenerating ? 'animate-spin' : ''}`} />
               <span>{isGenerating ? 'Synthesizing Detailed Brief...' : 'Generate 12-Pillar Brief with Gemini AI'}</span>
@@ -206,59 +212,101 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
             {generatedBrief ? (
               <div className="space-y-4 text-xs">
                 <div className="border-b border-slate-800 pb-3">
-                  <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase">Synthesized Content Brief</span>
-                  <h3 className="text-base font-bold text-white mt-1">{generatedBrief.recommendedTitle || targetKeyword}</h3>
-                  <p className="text-slate-400 text-[11px] mt-0.5 font-mono">Word Target: ~{generatedBrief.targetWordCount || 2400} words</p>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase">Synthesized Content Brief</span>
+                    <span className="text-[10px] font-mono text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                      Slug: /{generatedBrief.recommendedSlug || 'slug'}
+                    </span>
+                  </div>
+                  <h3 className="text-base font-bold text-white mt-1">{generatedBrief.seoTitle}</h3>
+                  <p className="text-slate-300 text-xs mt-1">{generatedBrief.metaDescription}</p>
+                  <div className="flex flex-wrap gap-3 mt-2 text-[11px] font-mono text-slate-400">
+                    <span>H1: <strong className="text-white">{generatedBrief.h1}</strong></span>
+                    <span>Target: <strong className="text-emerald-400">~{generatedBrief.targetWordCount || 2400} words</strong></span>
+                    <span>Intent: <strong className="text-indigo-400">{generatedBrief.searchIntent}</strong></span>
+                  </div>
                 </div>
 
-                {/* Title Options */}
-                {generatedBrief.titleOptions?.length > 0 && (
-                  <div>
-                    <span className="font-bold text-slate-300 uppercase tracking-wider text-[11px]">Recommended Title Angles</span>
-                    <ul className="list-disc list-inside text-slate-300 space-y-1 mt-1">
-                      {generatedBrief.titleOptions.map((t: string, i: number) => (
-                        <li key={i}>{t}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
                 {/* Heading Outline */}
-                {generatedBrief.headingOutline?.length > 0 && (
+                {generatedBrief.outline && generatedBrief.outline.length > 0 && (
                   <div>
                     <span className="font-bold text-slate-300 uppercase tracking-wider text-[11px]">Structural Heading Outline</span>
                     <div className="space-y-1.5 mt-2">
-                      {generatedBrief.headingOutline.map((h: any, i: number) => (
+                      {generatedBrief.outline.map((h, i) => (
                         <div key={i} className="p-2.5 rounded bg-slate-950 border border-slate-800">
-                          <span className="font-mono text-emerald-400 font-bold">{h.level}:</span>{' '}
-                          <span className="text-white font-medium">{h.heading}</span>
-                          <p className="text-[11px] text-slate-400 mt-0.5">{h.purpose}</p>
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-emerald-400 font-bold">{h.section}</span>
+                          </div>
+                          <p className="text-slate-300 text-[11px] mt-1">{h.description}</p>
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
 
-                {/* E-E-A-T & Information Gain Requirements */}
+                {/* Entities & Information Gain */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="p-3 bg-slate-950 rounded-lg border border-indigo-950/60 space-y-1">
-                    <span className="font-bold text-indigo-400 uppercase text-[10px]">E-E-A-T Requirements</span>
-                    <ul className="list-disc list-inside text-slate-300 space-y-0.5 text-[11px]">
-                      {generatedBrief.eeatRequirements?.map((e: string, i: number) => (
-                        <li key={i}>{e}</li>
+                  <div className="p-3 bg-slate-950 rounded-lg border border-indigo-950/60 space-y-1.5">
+                    <div className="flex items-center space-x-1.5 text-indigo-400 font-bold text-[10px] uppercase">
+                      <Tag className="h-3 w-3" />
+                      <span>Semantic Entities</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {generatedBrief.semanticEntities?.map((entity, i) => (
+                        <span key={i} className="text-[10px] px-1.5 py-0.5 bg-indigo-950/80 text-indigo-200 rounded border border-indigo-800/40">
+                          {entity}
+                        </span>
                       ))}
-                    </ul>
+                    </div>
                   </div>
 
-                  <div className="p-3 bg-slate-950 rounded-lg border border-emerald-950/60 space-y-1">
-                    <span className="font-bold text-emerald-400 uppercase text-[10px]">Information Gain Triggers</span>
+                  <div className="p-3 bg-slate-950 rounded-lg border border-emerald-950/60 space-y-1.5">
+                    <div className="flex items-center space-x-1.5 text-emerald-400 font-bold text-[10px] uppercase">
+                      <Sparkles className="h-3 w-3" />
+                      <span>Information Gain Angles</span>
+                    </div>
                     <ul className="list-disc list-inside text-slate-300 space-y-0.5 text-[11px]">
-                      {generatedBrief.informationGainTriggers?.map((g: string, i: number) => (
+                      {generatedBrief.informationGainAngles?.map((g, i) => (
                         <li key={i}>{g}</li>
                       ))}
                     </ul>
                   </div>
                 </div>
+
+                {/* Internal Links & FAQs */}
+                {generatedBrief.internalLinkSuggestions && generatedBrief.internalLinkSuggestions.length > 0 && (
+                  <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2">
+                    <div className="flex items-center space-x-1.5 text-emerald-400 font-bold text-[10px] uppercase">
+                      <Link2 className="h-3 w-3" />
+                      <span>Internal Link Opportunities</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {generatedBrief.internalLinkSuggestions.map((link, i) => (
+                        <div key={i} className="p-2 rounded bg-slate-900 border border-slate-800 text-[11px]">
+                          <span className="text-white font-mono font-bold">{link}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* FAQs */}
+                {generatedBrief.faq && generatedBrief.faq.length > 0 && (
+                  <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2">
+                    <div className="flex items-center space-x-1.5 text-slate-300 font-bold text-[10px] uppercase">
+                      <HelpCircle className="h-3 w-3" />
+                      <span>FAQ Schema Content</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {generatedBrief.faq.map((f, i) => (
+                        <div key={i} className="p-2 rounded bg-slate-900 border border-slate-800 text-[11px]">
+                          <strong className="text-slate-200 block">Q: {f.question}</strong>
+                          <p className="text-slate-400 mt-0.5">Angle: {f.answerAngle}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-center py-16 text-slate-500 text-xs">
@@ -276,7 +324,7 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div>
               <h2 className="text-sm font-bold text-white tracking-tight">Markdown Production Studio</h2>
-              <p className="text-xs text-slate-400">Zero generic fluff. Technical code blocks and proprietary data placeholders.</p>
+              <p className="text-xs text-slate-400">Technical code blocks and proprietary data placeholders.</p>
             </div>
             <span className="text-xs font-mono text-slate-400">
               {articleContent.split(/\s+/).filter(Boolean).length} Words
@@ -297,31 +345,38 @@ Sampling is mandatory at >10,000 requests/sec. Tail-based sampling via OpenTelem
         <div className="bg-slate-900 p-6 rounded-xl border border-slate-800 space-y-6">
           <div className="flex items-center justify-between border-b border-slate-800 pb-4">
             <div>
-              <h2 className="text-base font-bold text-white tracking-tight">E-E-A-T & Information Gain Diagnostic</h2>
-              <p className="text-xs text-slate-400">Evaluated against Google Search Quality Rater Guidelines</p>
+              <div className="flex items-center space-x-2">
+                <h2 className="text-base font-bold text-white tracking-tight">E-E-A-T & Information Gain Diagnostic</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  DEMO_FIXTURE
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                Automated real-time E-E-A-T scoring requires verified live author graph and citation crawlers. Below is the structural evaluation rubric.
+              </p>
             </div>
             <div className="text-right">
-              <span className="text-2xl font-bold font-mono text-emerald-400">92 / 100</span>
-              <span className="text-[10px] text-slate-400 block uppercase font-mono">High Authority Grade</span>
+              <span className="text-2xl font-bold font-mono text-slate-400">-- / 100</span>
+              <span className="text-[10px] text-slate-500 block uppercase font-mono">Real-Time Evaluation Pending</span>
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-1 text-xs">
-              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">1. Experience (90%)</span>
-              <p className="text-slate-300">Contains direct first-hand code examples and architectural benchmark measurements.</p>
+              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">1. Experience</span>
+              <p className="text-slate-400">First-hand screenshots, original data measurements, and tangible implementation evidence.</p>
             </div>
             <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-1 text-xs">
-              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">2. Expertise (95%)</span>
-              <p className="text-slate-300">Authored by Principal Infrastructure Architect with verified industry credentials.</p>
+              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">2. Expertise</span>
+              <p className="text-slate-400">Verified author credentials, subject matter domain depth, and accurate technical terminology.</p>
             </div>
             <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-1 text-xs">
-              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">3. Authoritativeness (92%)</span>
-              <p className="text-slate-300">Cited by CNCF ecosystem documentation and referenced across 14 industry publications.</p>
+              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">3. Authoritativeness</span>
+              <p className="text-slate-400">Industry citations, peer backlinks, and recognized topical authority in seed entities.</p>
             </div>
             <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-1 text-xs">
-              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">4. Trustworthiness (91%)</span>
-              <p className="text-slate-300">Fully transparent editorial review cycle, fact checking notes, and RFC citations.</p>
+              <span className="font-bold text-emerald-400 uppercase text-[10px] font-mono">4. Trustworthiness</span>
+              <p className="text-slate-400">Accurate sources, transparent editorial ownership, working SSL, and clean business disclosures.</p>
             </div>
           </div>
         </div>

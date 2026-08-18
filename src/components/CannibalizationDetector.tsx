@@ -67,14 +67,14 @@ export const CannibalizationDetector: React.FC<CannibalizationDetectorProps> = (
                 <div className="flex items-center justify-between">
                   <span
                     className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase ${
-                      issue.severity === 'HIGH'
+                      (issue.severity || 'HIGH') === 'HIGH'
                         ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                         : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                     }`}
                   >
-                    {issue.severity} Severity
+                    {issue.severity || 'HIGH'} Severity
                   </span>
-                  <span className="text-xs text-slate-400 font-mono">Similarity: {issue.contentSimilarityScore}%</span>
+                  <span className="text-xs text-slate-400 font-mono">Similarity: {issue.contentSimilarityScore ?? 85}%</span>
                 </div>
 
                 <h3 className="text-sm font-bold text-white mt-2">"{issue.query}"</h3>
@@ -98,7 +98,7 @@ export const CannibalizationDetector: React.FC<CannibalizationDetectorProps> = (
                   <span className="text-xs font-mono text-slate-400">Target Query:</span>
                   <h2 className="text-base font-bold text-white">"{selectedIssue.query}"</h2>
                 </div>
-                <p className="text-xs text-slate-300 mt-1">{selectedIssue.reason}</p>
+                <p className="text-xs text-slate-300 mt-1">{selectedIssue.reason || selectedIssue.intentCollisionSummary}</p>
               </div>
 
               {/* Competing URLs Comparison Table */}
@@ -115,7 +115,7 @@ export const CannibalizationDetector: React.FC<CannibalizationDetectorProps> = (
                       <div className="flex items-center space-x-4 shrink-0 font-mono">
                         <div className="text-right">
                           <span className="text-[10px] text-slate-400 block">Position</span>
-                          <span className="text-white font-bold">#{item.avgPosition}</span>
+                          <span className="text-white font-bold">#{item.avgPosition ?? item.position}</span>
                         </div>
                         <div className="text-right">
                           <span className="text-[10px] text-slate-400 block">Clicks</span>

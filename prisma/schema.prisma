@@ -1,0 +1,349 @@
+// Prisma Schema for Autonomous SEO Operating System
+// Target: PostgreSQL (with timeseries, multi-tenant isolation, and partition-ready indices)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum IntegrationProvider {
+  GSC
+  GA4
+  WORDPRESS
+  SHEETS
+  RANK_TRACKER
+}
+
+enum IntegrationStatus {
+  NOT_CONFIGURED
+  CONNECTING
+  CONNECTED
+  DEGRADED
+  ERROR
+  DISCONNECTED
+  REVOKED
+}
+
+enum ActionStatus {
+  RECOMMENDATION_ONLY
+  DRY_RUN_PENDING
+  DRY_RUN_COMPLETED
+  APPROVAL_REQUIRED
+  APPROVED
+  SCHEDULED
+  EXECUTING
+  EXECUTED_VERIFYING
+  VERIFIED_SUCCESS
+  VERIFIED_REGRESSED
+  FAILED
+  REVERTED
+  DISMISSED
+}
+
+enum AutomationRiskLevel {
+  LEVEL_0_SUGGESTION_ONLY
+  LEVEL_1_SAFE_AUTOMATION
+  LEVEL_2_REVIEW_REQUIRED
+  LEVEL_3_HIGH_RISK_MANUAL_ONLY
+}
+
+enum IssueSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+model Workspace {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  users       User[]
+  websites    Website[]
+
+  @@map("workspaces")
+}
+
+model User {
+  id          String    @id @default(uuid())
+  workspaceId String
+  email       String    @unique
+  name        String
+  role        UserRole  @default(OPERATOR)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  auditLogs   AuditLog[]
+
+  @@index([workspaceId])
+  @@map("users")
+}
+
+model Website {
+  id              String    @id @default(uuid())
+  workspaceId     String
+  domain          String
+  name            String
+  productionUrl   String
+  sitemapUrl      String?
+  defaultLanguage String    @default("en-US")
+  industry        String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  integrations    Integration[]
+  crawlRuns       CrawlRun[]
+  crawledPages    CrawledPage[]
+  recommendations SeoRecommendation[]
+  tasks           SeoTask[]
+  topicClusters   TopicCluster[]
+  auditLogs       AuditLog[]
+
+  @@unique([workspaceId, domain])
+  @@index([workspaceId])
+  @@map("websites")
+}
+
+model Integration {
+  id                   String              @id @default(uuid())
+  websiteId            String
+  provider             IntegrationProvider
+  status               IntegrationStatus   @default(NOT_CONFIGURED)
+  lastSyncAt           DateTime?
+  accountIdentifier    String?
+  message              String?
+  encryptedCredentials String?             // AES-256-GCM Encrypted JSON
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  website              Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, provider])
+  @@index([websiteId])
+  @@map("integrations")
+}
+
+model CrawlRun {
+  id              String        @id @default(uuid())
+  websiteId       String
+  status          String        @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED
+  startedAt       DateTime      @default(now())
+  completedAt     DateTime?
+  totalPages      Int           @default(0)
+  totalIssues     Int           @default(0)
+  durationMs      Int?
+  triggerSource   String        @default("MANUAL")
+
+  website         Website       @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  pages           CrawledPage[]
+  issues          CrawlIssue[]
+
+  @@index([websiteId, startedAt])
+  @@map("crawl_runs")
+}
+
+model CrawledPage {
+  id                     String       @id @default(uuid())
+  websiteId              String
+  crawlRunId             String
+  url                    String
+  pathname               String
+  statusCode             Int
+  loadTimeMs             Int
+  isIndexable            Boolean      @default(true)
+  canonicalUrl           String?
+  canonicalMatch         Boolean      @default(true)
+  title                  String?
+  titleLength            Int          @default(0)
+  metaDescription        String?
+  metaDescLength         Int          @default(0)
+  metaRobots             String?
+  xRobotsTag             String?
+  h1Tags                 String[]     @default([])
+  h2Count                Int          @default(0)
+  wordCount              Int          @default(0)
+  internalOutlinksCount  Int          @default(0)
+  externalOutlinksCount  Int          @default(0)
+  imagesCount            Int          @default(0)
+  missingAltCount        Int          @default(0)
+  schemaTypes            String[]     @default([])
+  crawledAt              DateTime     @default(now())
+
+  website                Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  crawlRun               CrawlRun     @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
+  issues                 CrawlIssue[]
+
+  @@index([websiteId, url])
+  @@index([crawlRunId])
+  @@map("crawled_pages")
+}
+
+model CrawlIssue {
+  id            String        @id @default(uuid())
+  crawlRunId    String
+  crawledPageId String?
+  type          String
+  severity      IssueSeverity
+  message       String
+  evidence      String
+  impact        String
+  resolved      Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+
+  crawlRun      CrawlRun      @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
+  crawledPage   CrawledPage?  @relation(fields: [crawledPageId], references: [id], onDelete: SetNull)
+
+  @@index([crawlRunId, severity])
+  @@map("crawl_issues")
+}
+
+model SearchAnalyticsDaily {
+  id          String   @id @default(uuid())
+  websiteId   String
+  date        DateTime @db.Date
+  query       String
+  page        String
+  device      String   @default("DESKTOP") // DESKTOP, MOBILE, TABLET
+  country     String   @default("GLOBAL")
+  clicks      Int      @default(0)
+  impressions Int      @default(0)
+  ctr         Float    @default(0)
+  position    Float    @default(0)
+
+  @@unique([websiteId, date, query, page, device, country])
+  @@index([websiteId, date])
+  @@index([websiteId, query])
+  @@index([websiteId, page])
+  @@map("search_analytics_daily")
+}
+
+model TopicCluster {
+  id            String         @id @default(uuid())
+  websiteId     String
+  pillarName    String
+  pillarUrl     String
+  searchVolume  Int            @default(0)
+  coverageScore Float          @default(0)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  website       Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  subtopics     TopicSubtopic[]
+
+  @@index([websiteId])
+  @@map("topic_clusters")
+}
+
+model TopicSubtopic {
+  id           String       @id @default(uuid())
+  clusterId    String
+  name         String
+  searchVolume Int          @default(0)
+  intent       String       @default("Informational")
+  status       String       @default("PLANNED") // PUBLISHED, PLANNED, DRAFT, GAP
+  url          String?
+  entities     String[]     @default([])
+  createdAt    DateTime     @default(now())
+
+  cluster      TopicCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId])
+  @@map("topic_subtopics")
+}
+
+model SeoRecommendation {
+  id              String              @id @default(uuid())
+  websiteId       String
+  title           String
+  category        String
+  actionType      String
+  evidence        String
+  source          String
+  confidenceScore Float               @default(0.8)
+  impactScore     Int                 @default(5)
+  effortScore     Int                 @default(5)
+  riskScore       Int                 @default(3)
+  businessValue   Int                 @default(5)
+  automationLevel AutomationRiskLevel @default(LEVEL_1_SAFE_AUTOMATION)
+  status          ActionStatus        @default(RECOMMENDATION_ONLY)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  website         Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  tasks           SeoTask[]
+
+  @@index([websiteId, status])
+  @@map("seo_recommendations")
+}
+
+model SeoTask {
+  id                 String              @id @default(uuid())
+  websiteId          String
+  recommendationId   String?
+  title              String
+  category           String
+  priority           String              @default("MEDIUM") // CRITICAL, HIGH, MEDIUM, LOW
+  opportunityScore   Float               @default(50.0)
+  automationLevel    AutomationRiskLevel @default(LEVEL_1_SAFE_AUTOMATION)
+  status             ActionStatus        @default(RECOMMENDATION_ONLY)
+  reason             String
+  evidence           String
+  affectedUrls       String[]            @default([])
+  actionType         String
+  actionPayloadJson  String?
+  beforeStateJson    String?
+  afterStateJson     String?
+  idempotencyKey     String?             @unique
+  scheduledFor       DateTime?
+  executedAt         DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  website            Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  recommendation     SeoRecommendation?  @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
+  auditLogs          AuditLog[]
+
+  @@index([websiteId, status])
+  @@map("seo_tasks")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  workspaceId String
+  websiteId   String?
+  userId      String?
+  taskId      String?
+  action      String
+  entityType  String
+  entityId    String
+  beforeState String?  // JSON string
+  afterState  String?  // JSON string
+  provenance  String   @default("USER_PROVIDED")
+  ipAddress   String?
+  timestamp   DateTime @default(now())
+
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  website     Website? @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  task        SeoTask? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, timestamp])
+  @@index([websiteId, timestamp])
+  @@map("audit_logs")
+}
