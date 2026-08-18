@@ -28,7 +28,7 @@ export class RobotsService {
       const res = await SafeUrlPolicy.safeFetch(robotsUrl, {
         timeoutMs: 6000,
         maxRedirects: 3,
-        maxResponseBytes: 512 * 1024, // 512 KB max for robots.txt
+        maxResponseBytes: 512 * 1024,
         allowedContentTypes: ['text/plain', 'text/html', '*/*'],
       });
 
@@ -36,7 +36,6 @@ export class RobotsService {
         const parsed = this.parseRobotsTxt(res.body);
         return { parsed, fetchStatus: 200 };
       } else if (res.statusCode === 404 || res.statusCode === 410) {
-        // 404/410 means everything is allowed
         return {
           parsed: { rules: [], sitemaps: [], rawContent: '' },
           fetchStatus: res.statusCode,
@@ -67,7 +66,6 @@ export class RobotsService {
     let crawlDelay: number | undefined;
 
     for (const rawLine of lines) {
-      // Strip comments
       const line = rawLine.split('#')[0].trim();
       if (!line) continue;
 
@@ -136,14 +134,14 @@ export class RobotsService {
 
     const activeRule = matchedRules[0];
 
-    // RFC 9309 longest-match comparison
+    // RFC 9309: Longest matching rule wins. If length tie, ALLOW wins.
     let longestMatchLen = -1;
     let allowedByLongestMatch = true;
     let matchedDirective = '';
 
     for (const allowPattern of activeRule.allow) {
       if (this.pathMatches(pathAndQuery, allowPattern)) {
-        if (allowPattern.length > longestMatchLen) {
+        if (allowPattern.length >= longestMatchLen) { // Tie-break: Allow wins or takes precedence
           longestMatchLen = allowPattern.length;
           allowedByLongestMatch = true;
           matchedDirective = `Allow: ${allowPattern}`;
@@ -153,7 +151,7 @@ export class RobotsService {
 
     for (const disallowPattern of activeRule.disallow) {
       if (this.pathMatches(pathAndQuery, disallowPattern)) {
-        if (disallowPattern.length > longestMatchLen) {
+        if (disallowPattern.length > longestMatchLen) { // Strict inequality so Allow wins ties
           longestMatchLen = disallowPattern.length;
           allowedByLongestMatch = false;
           matchedDirective = `Disallow: ${disallowPattern}`;
@@ -167,16 +165,20 @@ export class RobotsService {
     };
   }
 
-  private static pathMatches(pathAndQuery: string, pattern: string): boolean {
+  public static pathMatches(pathAndQuery: string, pattern: string): boolean {
     if (!pattern) return false;
     if (pattern === '/') return true;
 
-    // Convert robots wildcard syntax (* and $) to regex
-    const regexPattern = pattern
+    // Handle end-of-pattern anchor $
+    const hasEndAnchor = pattern.endsWith('$');
+    const cleanPattern = hasEndAnchor ? pattern.slice(0, -1) : pattern;
+
+    // Escape regex chars except wildcard *
+    const escaped = cleanPattern
       .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
       .replace(/\*/g, '.*');
 
-    const regex = new RegExp(`^${regexPattern}`);
+    const regex = new RegExp(`^${escaped}${hasEndAnchor ? '$' : ''}`);
     return regex.test(pathAndQuery);
   }
 }

@@ -14,13 +14,23 @@ export interface SafeFetchOptions {
   userAgent?: string;
 }
 
+export interface RedirectHopRecord {
+  sourceUrl: string;
+  targetUrl: string;
+  statusCode: number;
+  hopIndex: number;
+}
+
 export interface SafeFetchResult {
   requestedUrl: string;
   finalUrl: string;
   redirectCount: number;
+  redirectChain: RedirectHopRecord[];
+  isDowngradeToHttp: boolean;
   statusCode: number;
   headers: Record<string, string>;
   body: string;
+  rawBuffer: Buffer;
   contentType: string;
   loadTimeMs: number;
 }
@@ -68,7 +78,7 @@ export class SafeDestinationPolicy {
       if (b0 === 10) return true; // RFC1918 Private
       if (b0 === 172 && b1 >= 16 && b1 <= 31) return true; // RFC1918 Private
       if (b0 === 192 && b1 === 168) return true; // RFC1918 Private
-      if (b0 === 169 && b1 === 254) return true; // Link-Local & Cloud Metadata (169.254.169.254)
+      if (b0 === 169 && b1 === 254) return true; // Link-Local & Cloud Metadata
       if (b0 === 100 && b1 >= 64 && b1 <= 127) return true; // Carrier-grade NAT
       if (
         (b0 === 192 && b1 === 0 && b2 === 2) ||
@@ -146,7 +156,7 @@ export class SafeDestinationPolicy {
 }
 
 /**
- * 2. ResponseContentPolicy: Validates Content Type, Size Limits, and Headers
+ * 2. ResponseContentPolicy
  */
 export class ResponseContentPolicy {
   public static validateContentType(contentType: string, allowedTypes: string[]): boolean {
@@ -163,7 +173,7 @@ export class ResponseContentPolicy {
 }
 
 /**
- * 3. SafeUrlPolicy: Coordinates DNS-pinned fetch without TOCTOU DNS rebinding
+ * 3. SafeUrlPolicy
  */
 export class SafeUrlPolicy {
   public static isIpBlocked(ip: string): boolean {
@@ -198,12 +208,14 @@ export class SafeUrlPolicy {
       timeoutMs = 8000,
       maxRedirects = 5,
       maxResponseBytes = 5 * 1024 * 1024,
-      allowedContentTypes = ['text/html', 'application/xhtml+xml', 'text/plain'],
+      allowedContentTypes = ['text/html', 'application/xhtml+xml', 'text/plain', 'application/xml', 'text/xml', 'application/x-gzip', 'application/gzip', '*/*'],
       userAgent = 'Mozilla/5.0 (compatible; AI-SEO-Manager/2.0; +https://techscale.io/bot)',
     } = options;
 
     let currentUrl = initialUrl;
     let redirectCount = 0;
+    const redirectChain: RedirectHopRecord[] = [];
+    let isDowngradeToHttp = false;
     const startTime = Date.now();
 
     while (redirectCount <= maxRedirects) {
@@ -218,7 +230,6 @@ export class SafeUrlPolicy {
         throw new Error(`Protocol "${parsed.protocol}" not allowed. Only HTTP and HTTPS are permitted.`);
       }
 
-      // 1. Resolve and validate IP
       const destCheck = await SafeDestinationPolicy.resolveAndValidate(parsed.hostname);
       if (!destCheck.valid) {
         throw new Error(`SSRF Guard blocked request to ${currentUrl}: ${destCheck.error}`);
@@ -226,10 +237,9 @@ export class SafeUrlPolicy {
 
       const pinnedIp = destCheck.resolvedIps[0];
 
-      // 2. Perform connection with DNS Pinning (lookup pins directly to validated IP to prevent TOCTOU DNS rebinding)
+      // Custom Agent with DNS pinning to prevent TOCTOU DNS rebinding
       const agentOptions = {
         lookup: (_hostname: string, _opts: any, cb: any) => {
-          // Re-verify the IP before handing it to the socket connection
           if (SafeDestinationPolicy.isIpBlocked(pinnedIp)) {
             cb(new Error(`SSRF TOCTOU Guard: Target IP ${pinnedIp} is blocked`));
           } else {
@@ -253,7 +263,7 @@ export class SafeUrlPolicy {
             'Accept-Language': 'en-US,en;q=0.5',
           },
           signal: controller.signal,
-          redirect: 'manual', // Inspect each redirect hop individually
+          redirect: 'manual',
           // @ts-ignore
           agent: customAgent,
         });
@@ -270,6 +280,17 @@ export class SafeUrlPolicy {
           const nextUrl = new URL(location, currentUrl).toString();
           redirectCount++;
 
+          redirectChain.push({
+            sourceUrl: currentUrl,
+            targetUrl: nextUrl,
+            statusCode: response.status,
+            hopIndex: redirectCount,
+          });
+
+          if (currentUrl.startsWith('https://') && nextUrl.startsWith('http://')) {
+            isDowngradeToHttp = true;
+          }
+
           if (redirectCount > maxRedirects) {
             throw new Error(`Exceeded maximum redirect limit of ${maxRedirects}`);
           }
@@ -278,31 +299,13 @@ export class SafeUrlPolicy {
           continue;
         }
 
-        // Validate content-type
+        // Read raw response Buffer (binary-safe)
+        const arrayBuf = await response.arrayBuffer();
+        const rawBuffer = Buffer.from(arrayBuf);
+        ResponseContentPolicy.validateByteSize(rawBuffer.length, maxResponseBytes);
+
         const contentType = response.headers.get('content-type') || '';
-        if (response.status === 200 && !ResponseContentPolicy.validateContentType(contentType, allowedContentTypes)) {
-          throw new Error(`Disallowed content-type "${contentType}". Allowed: ${allowedContentTypes.join(', ')}`);
-        }
-
-        // Read response body with byte limit
-        const reader = response.body?.getReader();
-        const chunks: Uint8Array[] = [];
-        let totalBytes = 0;
-
-        if (reader) {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) {
-              totalBytes += value.length;
-              ResponseContentPolicy.validateByteSize(totalBytes, maxResponseBytes);
-              chunks.push(value);
-            }
-          }
-        }
-
-        const totalBuffer = Buffer.concat(chunks);
-        const bodyText = totalBuffer.toString('utf-8');
+        const bodyText = rawBuffer.toString('utf-8');
 
         const headersMap: Record<string, string> = {};
         response.headers.forEach((val, key) => {
@@ -313,9 +316,12 @@ export class SafeUrlPolicy {
           requestedUrl: initialUrl,
           finalUrl: currentUrl,
           redirectCount,
+          redirectChain,
+          isDowngradeToHttp,
           statusCode: response.status,
           headers: headersMap,
           body: bodyText,
+          rawBuffer,
           contentType,
           loadTimeMs: Date.now() - startTime,
         };

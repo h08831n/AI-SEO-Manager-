@@ -23,17 +23,19 @@ export interface SitemapDiscoveryResult {
 
 export class SitemapService {
   private static MAX_SITEMAP_BYTES = 10 * 1024 * 1024; // 10MB max raw bytes
-  private static MAX_DECOMPRESSED_BYTES = 50 * 1024 * 1024; // 50MB decompressed max (decompression bomb protection)
-  private static MAX_TOTAL_URLS = 50000;
+  private static MAX_DECOMPRESSED_BYTES = 50 * 1024 * 1024; // 50MB decompressed max
+  private static MAX_GLOBAL_SITEMAP_URLS = 50000;
+  private static MAX_SITEMAP_FILES = 100;
   private static MAX_SITEMAP_INDEX_DEPTH = 3;
 
   /**
-   * Fetches and parses a sitemap XML or sitemap index with full SSRF and safety protection
+   * Fetches and parses a sitemap XML or sitemap index with global safety caps and gzip support
    */
   public static async discoverUrlsFromSitemap(
     sitemapUrl: string,
     currentDepth = 0,
-    visitedSitemaps: Set<string> = new Set()
+    visitedSitemaps: Set<string> = new Set(),
+    globalUrlCountRef = { count: 0 }
   ): Promise<SitemapDiscoveryResult> {
     const result: SitemapDiscoveryResult = {
       discoveredUrls: [],
@@ -47,10 +49,16 @@ export class SitemapService {
       return result;
     }
 
-    if (visitedSitemaps.has(sitemapUrl)) {
+    if (visitedSitemaps.size >= this.MAX_SITEMAP_FILES) {
+      result.errors.push(`Maximum sitemap file limit (${this.MAX_SITEMAP_FILES}) reached`);
       return result;
     }
-    visitedSitemaps.add(sitemapUrl);
+
+    const normalizedSitemapUrl = UrlNormalizer.normalize(sitemapUrl);
+    if (visitedSitemaps.has(normalizedSitemapUrl)) {
+      return result;
+    }
+    visitedSitemaps.add(normalizedSitemapUrl);
 
     try {
       const fetchResult = await SafeUrlPolicy.safeFetch(sitemapUrl, {
@@ -62,21 +70,20 @@ export class SitemapService {
 
       let xmlContent = fetchResult.body;
 
-      // Handle gzip compressed sitemaps (.xml.gz)
+      // Handle gzip compressed sitemaps (.xml.gz or gzip content type)
       if (
         sitemapUrl.endsWith('.gz') ||
         fetchResult.contentType.includes('gzip') ||
-        fetchResult.contentType.includes('octet-stream')
+        fetchResult.contentType.includes('octet-stream') ||
+        fetchResult.rawBuffer.slice(0, 2).equals(Buffer.from([0x1f, 0x8b]))
       ) {
         try {
-          const rawBuffer = Buffer.from(fetchResult.body, 'binary');
-          const decompressed = await gunzipAsync(rawBuffer);
+          const decompressed = await gunzipAsync(fetchResult.rawBuffer);
           if (decompressed.length > this.MAX_DECOMPRESSED_BYTES) {
             throw new Error(`Decompressed sitemap size exceeded safety limit of ${this.MAX_DECOMPRESSED_BYTES} bytes`);
           }
           xmlContent = decompressed.toString('utf-8');
         } catch (decompErr: any) {
-          // If already plain text, proceed, else record error
           if (!xmlContent.includes('<?xml') && !xmlContent.includes('<urlset') && !xmlContent.includes('<sitemapindex')) {
             result.errors.push(`Failed to decompress gzipped sitemap: ${decompErr.message}`);
             return result;
@@ -86,7 +93,7 @@ export class SitemapService {
 
       const $ = cheerio.load(xmlContent, { xmlMode: true });
 
-      // 1. Check if it is a Sitemap Index (<sitemapindex>)
+      // 1. Sitemap Index (<sitemapindex>)
       const sitemapTags = $('sitemapindex > sitemap');
       if (sitemapTags.length > 0) {
         const nestedSitemaps: string[] = [];
@@ -97,10 +104,9 @@ export class SitemapService {
 
         result.sitemapIndexUrls.push(...nestedSitemaps);
 
-        // Recursively fetch nested sitemaps
         for (const nestedUrl of nestedSitemaps) {
-          if (result.discoveredUrls.length >= this.MAX_TOTAL_URLS) break;
-          const subResult = await this.discoverUrlsFromSitemap(nestedUrl, currentDepth + 1, visitedSitemaps);
+          if (globalUrlCountRef.count >= this.MAX_GLOBAL_SITEMAP_URLS) break;
+          const subResult = await this.discoverUrlsFromSitemap(nestedUrl, currentDepth + 1, visitedSitemaps, globalUrlCountRef);
           result.discoveredUrls.push(...subResult.discoveredUrls);
           result.sitemapIndexUrls.push(...subResult.sitemapIndexUrls);
           result.errors.push(...subResult.errors);
@@ -108,7 +114,7 @@ export class SitemapService {
       } else {
         // 2. Standard URL set (<urlset > url>)
         $('urlset > url').each((_, el) => {
-          if (result.discoveredUrls.length >= this.MAX_TOTAL_URLS) return;
+          if (globalUrlCountRef.count >= this.MAX_GLOBAL_SITEMAP_URLS) return;
 
           const loc = $(el).find('loc').text().trim();
           if (!loc) return;
@@ -127,8 +133,10 @@ export class SitemapService {
               changefreq,
               priority: isNaN(priority || 0) ? undefined : priority,
             });
+
+            globalUrlCountRef.count++;
           } catch {
-            // Malformed URL in sitemap ignored
+            // Ignore malformed URL
           }
         });
       }
