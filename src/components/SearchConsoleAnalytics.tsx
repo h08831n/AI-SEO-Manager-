@@ -70,7 +70,10 @@ export const SearchConsoleAnalytics: React.FC<SearchConsoleAnalyticsProps> = ({ 
         <div>
           <div className="flex items-center space-x-2 text-emerald-400 text-xs font-mono mb-1">
             <BarChart3 className="h-4 w-4" />
-            <span>GOOGLE SEARCH CONSOLE & GA4 UNIFIED ENGINE</span>
+            <span>GOOGLE SEARCH CONSOLE & GA4 PERFORMANCE VIEW</span>
+            <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              DEMO FIXTURE (GSC: NOT_CONFIGURED)
+            </span>
           </div>
           <h1 className="text-xl font-bold text-white tracking-tight">
             Search Performance & Conversion Analytics

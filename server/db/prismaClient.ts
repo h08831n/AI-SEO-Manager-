@@ -1,8 +1,9 @@
+// @ts-ignore
 import { PrismaClient } from '@prisma/client';
 
-let prismaInstance: PrismaClient | null = null;
+let prismaInstance: any = null;
 
-export function getPrismaClient(): PrismaClient | null {
+export function getPrismaClient(): any {
   if (!prismaInstance && process.env.DATABASE_URL) {
     try {
       prismaInstance = new PrismaClient();

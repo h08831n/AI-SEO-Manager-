@@ -8,10 +8,39 @@ export interface EncryptedSecretPayload {
 }
 
 export class SecretVault {
+  /**
+   * Retrieves and validates the 32-byte master encryption key from the environment.
+   * Never falls back to a hardcoded key.
+   */
   private static getMasterKey(): Buffer {
-    const rawKey = process.env.ENCRYPTION_MASTER_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-    // Ensure 32 bytes for AES-256
-    return crypto.createHash('sha256').update(rawKey).digest();
+    const rawKey = process.env.ENCRYPTION_MASTER_KEY;
+    if (!rawKey || rawKey.trim().length === 0) {
+      throw new Error(
+        'ENCRYPTION_MASTER_KEY environment variable is required for credential encryption/decryption operations.'
+      );
+    }
+
+    const trimmed = rawKey.trim();
+    // Support 64-character hex string (32 bytes)
+    if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+      return Buffer.from(trimmed, 'hex');
+    }
+
+    // Support 32-byte raw utf-8 string
+    if (Buffer.byteLength(trimmed, 'utf8') === 32) {
+      return Buffer.from(trimmed, 'utf8');
+    }
+
+    // Otherwise hash with SHA-256 to derive a deterministic 32-byte key
+    return crypto.createHash('sha256').update(trimmed).digest();
+  }
+
+  /**
+   * Validates if the encryption key is configured without exposing its value.
+   */
+  public static isKeyConfigured(): boolean {
+    const key = process.env.ENCRYPTION_MASTER_KEY;
+    return Boolean(key && key.trim().length > 0);
   }
 
   /**

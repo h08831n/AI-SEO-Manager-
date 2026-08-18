@@ -41,12 +41,15 @@ export const TaskEngine: React.FC<TaskEngineProps> = ({
           <div className="flex items-center space-x-2 text-emerald-400 text-xs font-mono mb-1">
             <ShieldCheck className="h-4 w-4" />
             <span>ICE PRIORITIZATION & DRY-RUN SAFETY EXECUTION</span>
+            <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              DEMO_FIXTURE DIRECTIVES
+            </span>
           </div>
           <h1 className="text-xl font-bold text-white tracking-tight">
             Prioritized SEO Task Engine
           </h1>
           <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-            Every technical flaw, decay signal, and opportunity is normalized into an ICE-scored directive (Impact x Confidence / Effort) with dry-run previews and automated rollbacks.
+            Every technical flaw, decay signal, and opportunity is normalized into an ICE-scored directive (Impact x Confidence / Effort) with dry-run previews and reversible state snapshots.
           </p>
         </div>
       </div>

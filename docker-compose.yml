@@ -1,0 +1,102 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Database Service (PostgreSQL 16)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: seo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_seo_manager}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ai_seo_manager}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - seo_network
+
+  # ---------------------------------------------------------------------------
+  # Cache & Queue Broker (Redis 7)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: seo_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - seo_network
+
+  # ---------------------------------------------------------------------------
+  # API & Web Application Process (Optional in Local Profile A, Primary in Profile B)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seo_api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_dev_password}@postgres:5432/${POSTGRES_DB:-ai_seo_manager}?schema=public
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - seo_network
+
+  # ---------------------------------------------------------------------------
+  # Background Worker Process (Long-Running SEO Jobs & Crawlers)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seo_worker
+    restart: unless-stopped
+    command: ["npm", "run", "start:worker"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_dev_password}@postgres:5432/${POSTGRES_DB:-ai_seo_manager}?schema=public
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - seo_network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  seo_network:
+    driver: bridge

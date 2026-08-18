@@ -104,10 +104,15 @@ export const AutonomousLoopModal: React.FC<AutonomousLoopModalProps> = ({
               <Zap className="h-4 w-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white tracking-tight">
-                42-Step Autonomous Daily SEO Loop
-              </h2>
-              <p className="text-xs text-slate-400">Full 24/7 Automated Crawler, Audit & ICE Prioritization Cycle</p>
+              <div className="flex items-center space-x-2">
+                <h2 className="text-base font-bold text-white tracking-tight">
+                  42-Step Autonomous Daily SEO Loop
+                </h2>
+                <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  WORKFLOW PREVIEW
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">Step-by-step preview of the 24/7 background audit and ICE prioritization cycle</p>
             </div>
           </div>
 

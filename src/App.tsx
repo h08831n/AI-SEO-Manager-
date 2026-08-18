@@ -99,25 +99,23 @@ export default function App() {
   };
 
   const handleDailyLoopFinished = () => {
-    // Increment health score and log transaction
+    // Keep verified score baseline without fake increments
     setHealthState((prev) => ({
       ...prev,
-      overallScore: Math.min(100, prev.overallScore + 2),
-      previousScore: prev.overallScore,
       lastCalculated: new Date().toISOString(),
     }));
 
     const newLog: AuditLogEntry = {
       id: `log-loop-${Date.now()}`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      action: 'Completed 42-Step Autonomous Daily SEO Loop',
+      action: 'Completed 42-Step Autonomous Daily SEO Loop (Workflow Preview)',
       affectedUrl: 'Domain-wide (248 Crawled URLs)',
-      triggeredBy: 'AUTONOMOUS_CRON',
-      reason: 'Scheduled morning continuous audit and SERP rank realignment cycle',
+      triggeredBy: 'SIMULATION_PREVIEW',
+      reason: 'Scheduled morning continuous audit and SERP rank realignment cycle simulation',
       reverted: false,
     };
     setAuditLogs((prev) => [newLog, ...prev]);
-    showToast('Autonomous 42-Step SEO Loop Executed! Health Score & Directives Updated.');
+    showToast('Autonomous 42-Step SEO Loop Simulation Completed.');
   };
 
   // Task Execution Handler
@@ -129,15 +127,15 @@ export default function App() {
     const newLog: AuditLogEntry = {
       id: `log-exec-${Date.now()}`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      action: `Executed Directive: ${task.title}`,
+      action: `Simulated Directive Execution: ${task.title}`,
       affectedUrl: task.affectedUrls[0] || selectedWebsite.domain,
-      triggeredBy: '1_CLICK_EXECUTION',
+      triggeredBy: 'DEMO_PREVIEW',
       reason: task.reason,
       rollbackState: { taskId: task.id, previousStatus: task.status },
       reverted: false,
     };
     setAuditLogs((prev) => [newLog, ...prev]);
-    showToast(`Executed: "${task.title}" with audit trail record logged.`);
+    showToast(`Executed (Preview): "${task.title}". Database mutation requires active worker.`);
   };
 
   // Rollback Handler
@@ -150,7 +148,7 @@ export default function App() {
         l.rollbackState?.taskId === taskId ? { ...l, reverted: true } : l
       )
     );
-    showToast(`Reverted changes for task ${taskId}. Snapshot baseline restored.`);
+    showToast(`Restored preview state for task ${taskId}.`);
   };
 
   // Add Crawled URL
@@ -160,7 +158,7 @@ export default function App() {
       urls: [urlData, ...prev.urls.filter((u) => u.url !== urlData.url)],
       totalUrls: prev.totalUrls + 1,
     }));
-    showToast(`Live audited URL ${urlData.path} stored in crawl database.`);
+    showToast(`Live audited URL ${urlData.path} added to in-memory session snapshot.`);
   };
 
   // Resolve Cannibalization
@@ -169,14 +167,14 @@ export default function App() {
     const newLog: AuditLogEntry = {
       id: `log-cannibal-${Date.now()}`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      action: `Cannibalization Resolved: "${issue.query}" -> ${chosenStrategy}`,
+      action: `Cannibalization Plan Staged: "${issue.query}" -> ${chosenStrategy}`,
       affectedUrl: issue.competingUrls[0]?.url || selectedWebsite.domain,
       triggeredBy: 'AI_SEO_MANAGER',
-      reason: `Applied strategy ${chosenStrategy} to consolidate search equity`,
+      reason: `Staged strategy ${chosenStrategy} to consolidate search equity`,
       reverted: false,
     };
     setAuditLogs((prev) => [newLog, ...prev]);
-    showToast(`Resolved cannibalization for "${issue.query}" via ${chosenStrategy}.`);
+    showToast(`Staged cannibalization fix for "${issue.query}" via ${chosenStrategy}.`);
   };
 
   // Content Pipeline Helpers

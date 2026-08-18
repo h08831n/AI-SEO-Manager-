@@ -347,3 +347,38 @@ model AuditLog {
   @@index([websiteId, timestamp])
   @@map("audit_logs")
 }
+
+model JobRun {
+  id           String    @id @default(uuid())
+  queueName    String
+  jobName      String
+  jobId        String?
+  payloadJson  String?
+  status       String    @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED, RETRYING
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(3)
+  errorMessage String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([queueName, status])
+  @@map("job_runs")
+}
+
+model OutboxEvent {
+  id            String    @id @default(uuid())
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payloadJson   String
+  status        String    @default("PENDING") // PENDING, PUBLISHED, FAILED
+  retryCount    Int       @default(0)
+  errorMessage  String?
+  publishedAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([status, createdAt])
+  @@map("outbox_events")
+}
