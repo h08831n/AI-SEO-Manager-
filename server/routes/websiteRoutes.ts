@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { WebsiteRepository } from '../repositories/websiteRepository';
 import { CrawlCoordinator } from '../services/crawler/crawlCoordinator';
 import { CrawlRepository } from '../repositories/crawlRepository';
+import { OutboxDispatcher } from '../services/outbox/outboxDispatcher';
 import { CrawlerQueueRegistry } from '../queues/crawlerQueue';
 import { z } from 'zod';
 
@@ -115,22 +116,24 @@ router.post('/:websiteId/crawls', async (req: Request, res: Response) => {
       excludePatterns,
     };
 
-    // 1. Create persisted CrawlRun
-    const crawlRun = await CrawlRepository.createCrawlRun({
+    // 1. Transactional creation of CrawlRun + OutboxEvent
+    const { crawlRun, outboxEventId } = await CrawlRepository.createCrawlRunWithOutbox({
       websiteId,
       seedUrl,
       config,
     });
 
-    // 2. Enqueue asynchronous coordinator job to BullMQ
-    const jobId = await CrawlerQueueRegistry.enqueueCoordinatorJob(websiteId, crawlRun.id, config);
+    // 2. Dispatch pending outbox events (asynchronous or worker pick-up)
+    setImmediate(() => {
+      OutboxDispatcher.dispatchPendingEvents().catch(() => {});
+    });
 
-    // 3. Return HTTP 202 Accepted immediately with crawlRunId (Non-blocking)
+    // 3. Return HTTP 202 Accepted immediately with crawlRunId and outbox tracking
     return res.status(202).json({
-      message: 'Crawl job successfully queued and accepted for asynchronous execution',
+      message: 'Crawl job transactional request recorded and accepted for outbox dispatch',
       crawlRunId: crawlRun.id,
-      jobId,
-      status: 'QUEUED',
+      outboxEventId,
+      status: crawlRun.status,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Crawl failed to queue' });

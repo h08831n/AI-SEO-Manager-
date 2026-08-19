@@ -245,6 +245,109 @@ export class CrawlRepository {
     return record;
   }
 
+  public static async createCrawlRunWithOutbox(params: {
+    websiteId: string;
+    seedUrl: string;
+    config: any;
+    triggerSource?: string;
+    correlationId?: string;
+  }): Promise<{ crawlRun: CrawlRunRecord; outboxEventId: string }> {
+    const prisma = getPrismaClient();
+    const crawlRunId = `crawl-run-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const outboxId = `outbox-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const configJson = JSON.stringify(params.config);
+
+    if (prisma) {
+      try {
+        const result = await prisma.$transaction(async (tx) => {
+          const crawlRun = await tx.crawlRun.create({
+            data: {
+              id: crawlRunId,
+              websiteId: params.websiteId,
+              status: 'PENDING',
+              seedUrl: params.seedUrl,
+              configJson,
+              triggerSource: params.triggerSource || 'MANUAL',
+              urlsDiscovered: 1,
+              urlsQueued: 1,
+            },
+          });
+
+          const outboxEvent = await tx.outboxEvent.create({
+            data: {
+              id: outboxId,
+              aggregateType: 'CRAWL_RUN',
+              aggregateId: crawlRun.id,
+              eventType: 'CRAWL_REQUESTED',
+              payloadJson: JSON.stringify({
+                websiteId: params.websiteId,
+                crawlRunId: crawlRun.id,
+                config: params.config,
+                correlationId: params.correlationId,
+              }),
+              status: 'PENDING',
+              attemptCount: 0,
+            },
+          });
+
+          return { crawlRun, outboxEvent };
+        });
+
+        return {
+          crawlRun: {
+            id: result.crawlRun.id,
+            websiteId: result.crawlRun.websiteId,
+            status: result.crawlRun.status,
+            seedUrl: result.crawlRun.seedUrl,
+            configJson: result.crawlRun.configJson,
+            startedAt: result.crawlRun.startedAt ? result.crawlRun.startedAt.toISOString() : undefined,
+            completedAt: result.crawlRun.completedAt ? result.crawlRun.completedAt.toISOString() : undefined,
+            durationMs: result.crawlRun.durationMs || undefined,
+            totalPages: result.crawlRun.totalPages,
+            totalIssues: result.crawlRun.totalIssues,
+            urlsDiscovered: result.crawlRun.urlsDiscovered,
+            urlsQueued: result.crawlRun.urlsQueued,
+            urlsFetched: result.crawlRun.urlsFetched,
+            urlsSkipped: result.crawlRun.urlsSkipped,
+            urlsFailed: result.crawlRun.urlsFailed,
+            robotsTxtStatus: result.crawlRun.robotsTxtStatus || undefined,
+            robotsTxtHash: result.crawlRun.robotsTxtHash || undefined,
+            sitemapsDiscovered: result.crawlRun.sitemapsDiscovered,
+            triggerSource: result.crawlRun.triggerSource,
+          },
+          outboxEventId: result.outboxEvent.id,
+        };
+      } catch (err) {
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: Transactional crawl creation failed: ${err}`);
+        }
+      }
+    }
+
+    const devCrawlRun: CrawlRunRecord = {
+      id: crawlRunId,
+      websiteId: params.websiteId,
+      status: 'PENDING',
+      seedUrl: params.seedUrl,
+      configJson,
+      totalPages: 0,
+      totalIssues: 0,
+      urlsDiscovered: 1,
+      urlsQueued: 1,
+      urlsFetched: 0,
+      urlsSkipped: 0,
+      urlsFailed: 0,
+      sitemapsDiscovered: [],
+      triggerSource: params.triggerSource || 'MANUAL',
+    };
+    devCrawlRuns.set(crawlRunId, devCrawlRun);
+
+    return {
+      crawlRun: devCrawlRun,
+      outboxEventId: outboxId,
+    };
+  }
+
   public static async createCrawlRun(params: {
     websiteId: string;
     seedUrl: string;

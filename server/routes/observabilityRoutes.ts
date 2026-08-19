@@ -61,11 +61,9 @@ router.get('/status', async (req: Request, res: Response) => {
     workerStatus = 'DOWN';
   }
 
-  // 4. Gemini AI Model Configuration Check
-  let geminiStatus: ServiceStatus = 'NOT_CONFIGURED';
-  if (process.env.GEMINI_API_KEY) {
-    geminiStatus = 'UP';
-  }
+  // 4. Gemini AI Model Configuration Check (Honest configuration check without assuming unexecuted live probe)
+  const isGeminiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0);
+  const geminiStatus: ServiceStatus = isGeminiConfigured ? 'UP' : 'NOT_CONFIGURED';
 
   const isHealthy = dbStatus !== 'DOWN' && redisStatus !== 'DOWN' && workerStatus !== 'DOWN';
 
@@ -83,6 +81,10 @@ router.get('/status', async (req: Request, res: Response) => {
         googleAnalytics4: 'NOT_CONFIGURED',
         wordPress: 'NOT_CONFIGURED',
         gemini: geminiStatus,
+      },
+      geminiIntegration: {
+        configured: isGeminiConfigured,
+        status: isGeminiConfigured ? 'CONFIGURED' : 'NOT_CONFIGURED',
       },
     },
     engines: {

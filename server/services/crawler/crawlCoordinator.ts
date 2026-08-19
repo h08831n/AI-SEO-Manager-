@@ -204,18 +204,47 @@ export class CrawlCoordinator {
           }
         }
 
-        // Safe Fetch
+        // Rate Limiting Throttling
+        const rps = config.requestsPerSecond || 10;
+        const minIntervalMs = Math.max(10, Math.floor(1000 / rps));
+        await new Promise((r) => setTimeout(r, minIntervalMs));
+
+        // Safe Fetch with URL-level Retry
         let fetchResult: any;
-        try {
-          fetchResult = await SafeUrlPolicy.safeFetch(nextItem.url, {
-            timeoutMs: requestTimeoutMs,
-            maxRedirects,
-            maxResponseBytes,
-            userAgent,
-          });
-        } catch (fetchErr: any) {
-          hadFetchErrors = true;
-          await frontier.markFailed(nextItem.normalizedUrl, fetchErr.message);
+        let attempt = 0;
+        const maxRetries = 3;
+
+        while (attempt < maxRetries) {
+          try {
+            fetchResult = await SafeUrlPolicy.safeFetch(nextItem.url, {
+              timeoutMs: requestTimeoutMs,
+              maxRedirects,
+              maxResponseBytes,
+              userAgent,
+            });
+            break;
+          } catch (fetchErr: any) {
+            attempt++;
+            const errMsg = (fetchErr.message || '').toLowerCase();
+            const isRetryable =
+              errMsg.includes('timeout') ||
+              errMsg.includes('502') ||
+              errMsg.includes('503') ||
+              errMsg.includes('504') ||
+              errMsg.includes('429') ||
+              errMsg.includes('econnreset') ||
+              errMsg.includes('etimedout');
+
+            if (!isRetryable || attempt >= maxRetries) {
+              hadFetchErrors = true;
+              await frontier.markFailed(nextItem.normalizedUrl, fetchErr.message);
+              break;
+            }
+            await new Promise((r) => setTimeout(r, Math.min(2000, 150 * Math.pow(2, attempt))));
+          }
+        }
+
+        if (!fetchResult) {
           continue;
         }
 
@@ -323,7 +352,7 @@ export class CrawlCoordinator {
         crawledPagesBuffer.push(pageRecord);
         await frontier.markCompleted(nextItem.normalizedUrl);
 
-        // 10. Process and record full link graph (every link, no 10-link sampling)
+        // 10. Process and record full link graph (both internal AND external outlinks)
         for (const internalLink of parsedHtml.internalLinks) {
           try {
             const resolvedTarget = UrlNormalizer.resolveAndNormalize(internalLink.href, originUrl);
@@ -350,6 +379,68 @@ export class CrawlCoordinator {
             // malformed target ignored
           }
         }
+
+        // Persist external link edges with isInternal: false
+        for (const externalLink of parsedHtml.externalLinks) {
+          try {
+            discoveredLinkEdges.push({
+              sourceUrl: nextItem.normalizedUrl,
+              targetUrl: externalLink.href,
+              normalizedTarget: externalLink.href,
+              anchorText: externalLink.anchorText,
+              isInternal: false,
+              isNofollow: externalLink.isNofollow,
+              rel: externalLink.rel || undefined,
+            });
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      // 10. Metadata Map for Technical Issue Detection
+      const pageMetadataMap = new Map<
+        string,
+        {
+          hasMultipleCanonicals: boolean;
+          isMalformedCanonical: boolean;
+          hreflangIssues: any[];
+          redirectLoop: boolean;
+          isDowngradeToHttp: boolean;
+        }
+      >();
+
+      for (const item of crawledPagesBuffer) {
+        // Find hreflangs & canonical metadata if present
+        let parsedHreflangs: any[] = [];
+        try {
+          if (item.hreflangsJson) parsedHreflangs = JSON.parse(item.hreflangsJson);
+        } catch {}
+
+        const hreflangRes = HreflangAnalyzer.analyze(
+          item.finalUrl || item.url,
+          parsedHreflangs.map((h: any) => ({
+            lang: h.lang,
+            href: h.href,
+            normalizedHref: UrlNormalizer.normalize(h.href, originUrl),
+            isValidSyntax: true,
+          }))
+        );
+
+        const canonicalRes = CanonicalAnalyzer.analyze(
+          item.finalUrl || item.url,
+          item.canonicalUrl || null,
+          item.canonicalUrl ? 1 : 0,
+          originUrl
+        );
+
+        pageMetadataMap.set(item.normalizedUrl, {
+          hasMultipleCanonicals: canonicalRes.hasMultipleCanonicals,
+          isMalformedCanonical: canonicalRes.isMalformed,
+          hreflangIssues: hreflangRes.issues,
+          redirectLoop: item.redirectCount > maxRedirects,
+          isDowngradeToHttp: (item.url.startsWith('https://') && (item.finalUrl || '').startsWith('http://')),
+        });
       }
 
       // 11. Exact Duplicate Content Grouping
@@ -389,6 +480,8 @@ export class CrawlCoordinator {
           page.crawlDepth = node.crawlDepth;
         }
 
+        const extraMeta = pageMetadataMap.get(page.normalizedUrl);
+
         // 13. Canonical Technical Issue Detection
         const evaluatedIssues = ExpandedTechnicalIssueDetector.detectIssues({
           url: page.url,
@@ -402,7 +495,11 @@ export class CrawlCoordinator {
           xRobotsTag: page.xRobotsTag,
           canonicalUrl: page.canonicalUrl,
           canonicalMatch: page.canonicalMatch,
+          hasMultipleCanonicals: extraMeta?.hasMultipleCanonicals,
+          isMalformedCanonical: extraMeta?.isMalformedCanonical,
           redirectCount: page.redirectCount,
+          redirectLoop: extraMeta?.redirectLoop,
+          isDowngradeToHttp: extraMeta?.isDowngradeToHttp,
           imagesCount: page.imagesCount,
           missingAltCount: page.missingAltCount,
           schemaStatus: page.schemaStatus,
@@ -412,6 +509,7 @@ export class CrawlCoordinator {
           soft404Confidence: page.soft404Confidence,
           isOrphanCandidate: node?.isOrphanCandidate,
           crawlDepth: page.crawlDepth,
+          hreflangIssues: extraMeta?.hreflangIssues,
         });
 
         for (const issue of evaluatedIssues) {
@@ -479,13 +577,26 @@ export class CrawlCoordinator {
       await CrawlRepository.saveIssuesBatch(crawlRunId, detectedIssuesBuffer);
       await CrawlRepository.saveLinkEdgesBatch(crawlRunId, linkEdgeRecords);
 
-      // 16. Historical Snapshot Comparison & SEO Event Generation
+      // 16. Historical Snapshot Comparison & SEO Event Generation (Paginated Retrieval)
       const previousRuns = await CrawlRepository.listCrawlRuns(websiteId);
-      const lastCompleted = previousRuns.runs.find((r) => r.id !== crawlRunId && (r.status === 'COMPLETED' || r.status === 'COMPLETED_WITH_ERRORS'));
+      const lastCompleted = previousRuns.runs.find(
+        (r) => r.id !== crawlRunId && (r.status === 'COMPLETED' || r.status === 'COMPLETED_WITH_ERRORS')
+      );
 
       if (lastCompleted) {
-        const previousPagesResult = await CrawlRepository.getCrawledPages(lastCompleted.id, { limit: 10000 });
-        const previousPages = previousPagesResult.pages;
+        let offset = 0;
+        const limit = 500;
+        const previousPages: CrawledPageRecord[] = [];
+
+        while (true) {
+          const pageBatch = await CrawlRepository.getCrawledPages(lastCompleted.id, { offset, limit });
+          previousPages.push(...pageBatch.pages);
+          if (previousPages.length >= pageBatch.total || pageBatch.pages.length === 0) {
+            break;
+          }
+          offset += limit;
+        }
+
         const currSnapshots: CrawledPageSnapshot[] = crawledPagesBuffer.map((p) => ({
           url: p.url,
           normalizedUrl: p.normalizedUrl,
@@ -495,10 +606,13 @@ export class CrawlCoordinator {
           metaDescription: p.metaDescription,
           h1Tags: p.h1Tags,
           canonicalUrl: p.canonicalUrl,
+          metaRobots: p.metaRobots,
+          xRobotsTag: p.xRobotsTag,
           isIndexable: p.isIndexable,
           contentHash: p.contentHash,
           inlinksCount: p.internalInlinksCount,
         }));
+
         const prevSnapshots: CrawledPageSnapshot[] = previousPages.map((p) => ({
           url: p.url,
           normalizedUrl: p.normalizedUrl,
@@ -508,6 +622,8 @@ export class CrawlCoordinator {
           metaDescription: p.metaDescription,
           h1Tags: p.h1Tags,
           canonicalUrl: p.canonicalUrl,
+          metaRobots: p.metaRobots,
+          xRobotsTag: p.xRobotsTag,
           isIndexable: p.isIndexable,
           contentHash: p.contentHash,
           inlinksCount: p.internalInlinksCount,
