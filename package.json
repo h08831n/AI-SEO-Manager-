@@ -18,7 +18,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "verify:runtime": "bash scripts/verify-runtime.sh"
+    "verify:runtime": "bash scripts/verify-runtime.sh",
+    "verify:google-live": "vitest run tests/googleLiveSmoke.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

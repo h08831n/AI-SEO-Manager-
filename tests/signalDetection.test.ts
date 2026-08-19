@@ -45,12 +45,13 @@ describe('Phase 3: SignalDetectionEngine Test Suite', () => {
 
     expect(signals.length).toBeGreaterThanOrEqual(3);
 
-    const dropSignal = signals.find((s) => s.eventType === 'ORGANIC_TRAFFIC_DROP');
+    const dropSignal = signals.find((s) => s.eventType === 'CLICKS_DROP');
     expect(dropSignal).toBeDefined();
     expect(dropSignal?.severity).toBe('CRITICAL');
-    expect(dropSignal?.source).toBe('GSC');
+    expect(dropSignal?.source).toBe('GOOGLE_SEARCH_CONSOLE');
+    expect(dropSignal?.provenance).toBe('CALCULATED');
 
-    const decaySignal = signals.find((s) => s.eventType === 'QUERY_RANKING_DECAY');
+    const decaySignal = signals.find((s) => s.eventType === 'CONTENT_DECAY_CANDIDATE');
     expect(decaySignal).toBeDefined();
     expect(decaySignal?.details.query).toBe('high traffic core query');
 

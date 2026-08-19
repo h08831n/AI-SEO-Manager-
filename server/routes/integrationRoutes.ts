@@ -16,6 +16,15 @@ export const integrationRoutes = Router();
  */
 integrationRoutes.get('/google/auth-url', async (req: Request, res: Response) => {
   try {
+    if (!GoogleOAuthClient.isConfigured()) {
+      return res.status(200).json({
+        configured: false,
+        status: 'NOT_CONFIGURED',
+        error: 'GOOGLE_INTEGRATION_NOT_CONFIGURED',
+        message: 'Google OAuth credentials (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET) are not configured in this environment.',
+      });
+    }
+
     const websiteId = req.query.websiteId as string | undefined;
     const workspaceId = (req.query.workspaceId as string) || (req as any).auth?.workspaceId || 'default-workspace';
     const userId = (req.query.userId as string) || (req as any).auth?.userId || 'default-user';
@@ -41,7 +50,7 @@ integrationRoutes.get('/google/auth-url', async (req: Request, res: Response) =>
       redirectUri,
     });
 
-    res.json({ authUrl, state, redirectUri });
+    res.json({ configured: true, authUrl, state, redirectUri });
   } catch (err: any) {
     res.status(500).json({ error: 'FAILED_TO_GENERATE_AUTH_URL', message: err.message });
   }

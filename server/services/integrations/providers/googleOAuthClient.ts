@@ -27,6 +27,12 @@ export class GoogleOAuthClient {
     'profile',
   ];
 
+  public static isConfigured(): boolean {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const secret = process.env.GOOGLE_CLIENT_SECRET;
+    return Boolean(clientId && clientId.trim().length > 0 && secret && secret.trim().length > 0);
+  }
+
   public static getClientId(): string {
     const clientId = process.env.GOOGLE_CLIENT_ID;
     if (!clientId || clientId.trim().length === 0) {
