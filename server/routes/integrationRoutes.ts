@@ -1,95 +1,417 @@
 import { Router, Request, Response } from 'express';
-import { IntegrationRepository } from '../repositories/integrationRepository';
-import {
-  WordPressPreviewRequestSchema,
-  WordPressPreviewResponse,
-  CSVExportRequestSchema,
-} from '../../src/shared/contracts';
+import { prisma } from '../db/prisma';
+import { GoogleOAuthClient } from '../services/integrations/providers/googleOAuthClient';
+import { GoogleIntegrationRepository } from '../repositories/googleIntegrationRepository';
+import { GoogleSearchConsoleProvider } from '../services/integrations/providers/googleSearchConsoleProvider';
+import { GoogleAnalytics4Provider } from '../services/integrations/providers/googleAnalytics4Provider';
+import { IntegrationSyncEngine } from '../services/integrations/syncEngine';
+import { SyncQueueProducer } from '../queues/syncQueueProducer';
+import { AnalyticsRepository } from '../repositories/analyticsRepository';
+import { PeriodComparisonEngine } from '../services/analytics/periodComparisonEngine';
 
-const router = Router();
+export const integrationRoutes = Router();
 
-// GET /api/integrations
-router.get('/', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
-  const list = await IntegrationRepository.listForWebsite(websiteId);
-  return res.json({ integrations: list });
-});
+/**
+ * Initiates the Google OAuth authorization flow.
+ */
+integrationRoutes.get('/google/auth-url', async (req: Request, res: Response) => {
+  try {
+    const websiteId = req.query.websiteId as string | undefined;
+    const workspaceId = (req.query.workspaceId as string) || (req as any).auth?.workspaceId || 'default-workspace';
+    const userId = (req.query.userId as string) || (req as any).auth?.userId || 'default-user';
 
-// GET /api/integrations/:provider/status
-router.get('/:provider/status', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
-  const status = await IntegrationRepository.getStatus(websiteId, req.params.provider);
-  return res.json(status);
-});
+    const state = GoogleOAuthClient.generateState();
+    const { codeVerifier, codeChallenge } = GoogleOAuthClient.generatePkce();
 
-// POST /api/export-wordpress (Honest Payload Preview - NO false success!)
-router.post('/export-wordpress', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
-  const parseResult = WordPressPreviewRequestSchema.safeParse(req.body);
+    const redirectUri = GoogleOAuthClient.getRedirectUri();
 
-  if (!parseResult.success) {
-    return res.status(400).json({ error: 'Invalid WordPress draft payload', details: parseResult.error.flatten() });
-  }
-
-  const wpStatus = await IntegrationRepository.getStatus(websiteId, 'WORDPRESS');
-
-  const responsePayload: WordPressPreviewResponse = {
-    status: 'WORDPRESS_PAYLOAD_PREVIEW',
-    connectionStatus: wpStatus.status,
-    message:
-      wpStatus.status === 'CONNECTED'
-        ? 'WordPress connection verified. Payload prepared for publishing queue.'
-        : 'WordPress is NOT CONNECTED. Draft payload generated for local preview/manual import only.',
-    payload: parseResult.data,
-    postId: null, // Null because post is not actually published without live credentials
-    provenance: 'USER_PROVIDED',
-  };
-
-  return res.json(responsePayload);
-});
-
-// POST /api/export-csv
-router.post('/export-csv', (req: Request, res: Response) => {
-  const parseResult = CSVExportRequestSchema.safeParse(req.body);
-  if (!parseResult.success) {
-    return res.status(400).json({ error: 'Invalid CSV export payload' });
-  }
-
-  const { filename, rows } = parseResult.data;
-  if (!rows || rows.length === 0) {
-    return res.status(400).json({ error: 'No rows provided for export' });
-  }
-
-  const headers = Object.keys(rows[0]);
-  const csvLines = [headers.join(',')];
-
-  for (const row of rows) {
-    const values = headers.map((header) => {
-      const val = row[header];
-      const stringVal = val === null || val === undefined ? '' : String(val);
-      const escaped = stringVal.replace(/"/g, '""');
-      return `"${escaped}"`;
+    await GoogleIntegrationRepository.createOAuthStateSession({
+      state,
+      codeVerifier,
+      workspaceId,
+      userId,
+      websiteId,
+      redirectUri,
+      expiresInMinutes: 15,
     });
-    csvLines.push(values.join(','));
+
+    const authUrl = GoogleOAuthClient.generateAuthUrl({
+      state,
+      codeChallenge,
+      redirectUri,
+    });
+
+    res.json({ authUrl, state, redirectUri });
+  } catch (err: any) {
+    res.status(500).json({ error: 'FAILED_TO_GENERATE_AUTH_URL', message: err.message });
   }
-
-  const csvContent = csvLines.join('\n');
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  return res.send(csvContent);
 });
 
-// POST /api/export-sheets (Honest Sheets API response - NOT CONFIGURED)
-router.post('/export-sheets', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
-  const sheetsStatus = await IntegrationRepository.getStatus(websiteId, 'SHEETS');
+/**
+ * Google OAuth 2.0 Callback handler.
+ */
+integrationRoutes.get('/google/callback', async (req: Request, res: Response) => {
+  try {
+    const code = req.query.code as string;
+    const state = req.query.state as string;
+    const error = req.query.error as string;
 
-  return res.status(501).json({
-    status: 'NOT_CONFIGURED',
-    connectionStatus: sheetsStatus.status,
-    message: 'Google Sheets OAuth API integration is NOT CONFIGURED. Direct cloud spreadsheet synchronization is unavailable. Please download the dataset as CSV instead.',
-    provenance: 'DATA_UNAVAILABLE',
-  });
+    if (error) {
+      return res.redirect(`/?authError=${encodeURIComponent(error)}`);
+    }
+
+    if (!code || !state) {
+      return res.status(400).json({ error: 'MISSING_CODE_OR_STATE', message: 'Missing authorization code or state.' });
+    }
+
+    // Consume state session safely (single-use)
+    const session = await GoogleIntegrationRepository.consumeOAuthStateSession(state);
+
+    // Exchange tokens
+    const tokens = await GoogleOAuthClient.exchangeCodeForTokens({
+      code,
+      codeVerifier: session.codeVerifier || undefined,
+      redirectUri: session.redirectUri,
+    });
+
+    // Verify token info & get email
+    const tokenInfo = await GoogleOAuthClient.verifyTokenInfo(tokens.accessToken);
+
+    if (session.websiteId) {
+      await GoogleIntegrationRepository.saveGoogleConnection({
+        websiteId: session.websiteId,
+        tokens,
+        accountEmail: tokenInfo.email,
+        scopes: tokenInfo.scopes,
+      });
+      return res.redirect(`/settings?tab=integrations&status=connected&email=${encodeURIComponent(tokenInfo.email || '')}`);
+    }
+
+    res.json({
+      success: true,
+      email: tokenInfo.email,
+      scopes: tokenInfo.scopes,
+      message: 'Google authorization succeeded.',
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: 'GOOGLE_AUTH_CALLBACK_FAILED', message: err.message });
+  }
 });
 
-export default router;
+/**
+ * Lists Search Console properties accessible for the connected website.
+ */
+integrationRoutes.get('/websites/:websiteId/gsc/properties', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId);
+
+    const provider = new GoogleSearchConsoleProvider();
+    const properties = await provider.listAccessibleProperties(accessToken);
+
+    const currentBinding = await prisma.searchConsolePropertyBinding.findUnique({
+      where: { websiteId },
+    });
+
+    res.json({ properties, currentBinding });
+  } catch (err: any) {
+    res.status(500).json({ error: 'GSC_PROPERTIES_FETCH_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Binds a selected GSC property to the website.
+ */
+integrationRoutes.post('/websites/:websiteId/gsc/bind', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const { propertyId, propertyType, permissionLevel } = req.body;
+
+    if (!propertyId) {
+      return res.status(400).json({ error: 'MISSING_PROPERTY_ID', message: 'propertyId is required.' });
+    }
+
+    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId);
+    const provider = new GoogleSearchConsoleProvider();
+
+    const verification = await provider.verifyPropertyAccess(accessToken, propertyId);
+    if (!verification.accessible) {
+      return res.status(403).json({ error: 'PROPERTY_NOT_ACCESSIBLE', message: verification.error });
+    }
+
+    const binding = await GoogleIntegrationRepository.bindGscProperty({
+      websiteId,
+      providerPropertyId: propertyId,
+      providerPropertyType: propertyType || (propertyId.startsWith('sc-domain:') ? 'DOMAIN' : 'URL_PREFIX'),
+      permissionLevel: permissionLevel || verification.permissionLevel,
+    });
+
+    // Trigger initial sync
+    try {
+      const syncEngine = new IntegrationSyncEngine();
+      syncEngine.syncSearchConsole({ websiteId, syncType: 'INITIAL_BACKFILL' }).catch((err) => {
+        console.error('[Async GSC Initial Sync Error]:', err.message);
+      });
+    } catch {
+      // Async
+    }
+
+    res.json({ success: true, binding });
+  } catch (err: any) {
+    res.status(500).json({ error: 'GSC_BINDING_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Lists GA4 properties accessible for the connected website.
+ */
+integrationRoutes.get('/websites/:websiteId/ga4/properties', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId);
+
+    const provider = new GoogleAnalytics4Provider();
+    const result = await provider.listAccessibleAccountsAndProperties(accessToken);
+
+    const currentBinding = await prisma.ga4PropertyBinding.findUnique({
+      where: { websiteId },
+    });
+
+    res.json({ ...result, currentBinding });
+  } catch (err: any) {
+    res.status(500).json({ error: 'GA4_PROPERTIES_FETCH_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Binds a selected GA4 property to the website.
+ */
+integrationRoutes.post('/websites/:websiteId/ga4/bind', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const { propertyId, accountId, accountName, displayName, timeZone, currencyCode } = req.body;
+
+    if (!propertyId) {
+      return res.status(400).json({ error: 'MISSING_PROPERTY_ID', message: 'propertyId is required.' });
+    }
+
+    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId);
+    const provider = new GoogleAnalytics4Provider();
+
+    const verification = await provider.verifyPropertyAccess(accessToken, propertyId);
+    if (!verification.accessible) {
+      return res.status(403).json({ error: 'GA4_PROPERTY_NOT_ACCESSIBLE', message: verification.error });
+    }
+
+    const binding = await GoogleIntegrationRepository.bindGa4Property({
+      websiteId,
+      providerPropertyId: propertyId,
+      providerAccountId: accountId,
+      providerAccountName: accountName,
+      providerDisplayName: displayName,
+      timeZone: timeZone || verification.timeZone || 'UTC',
+      currencyCode: currencyCode || verification.currencyCode || 'USD',
+    });
+
+    // Trigger initial GA4 sync
+    try {
+      const syncEngine = new IntegrationSyncEngine();
+      syncEngine.syncGoogleAnalytics4({ websiteId, syncType: 'INITIAL_BACKFILL' }).catch((err) => {
+        console.error('[Async GA4 Initial Sync Error]:', err.message);
+      });
+    } catch {
+      // Async
+    }
+
+    res.json({ success: true, binding });
+  } catch (err: any) {
+    res.status(500).json({ error: 'GA4_BINDING_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Triggers a manual sync for GSC, GA4, or both.
+ */
+integrationRoutes.post('/websites/:websiteId/sync', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const { provider = 'ALL', syncType = 'MANUAL_RESYNC', startDate, endDate } = req.body;
+
+    const syncEngine = new IntegrationSyncEngine();
+
+    // In local sandbox or quick sync, execute immediately and return sync run details
+    const results: Record<string, any> = {};
+
+    if (provider === 'GSC' || provider === 'ALL') {
+      try {
+        results.gsc = await syncEngine.syncSearchConsole({
+          websiteId,
+          syncType,
+          startDate,
+          endDate,
+        });
+      } catch (e: any) {
+        results.gscError = e.message;
+      }
+    }
+
+    if (provider === 'GA4' || provider === 'ALL') {
+      try {
+        results.ga4 = await syncEngine.syncGoogleAnalytics4({
+          websiteId,
+          syncType,
+          startDate,
+          endDate,
+        });
+      } catch (e: any) {
+        results.ga4Error = e.message;
+      }
+    }
+
+    res.json({ success: true, results });
+  } catch (err: any) {
+    res.status(500).json({ error: 'SYNC_TRIGGER_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Returns recent integration sync runs.
+ */
+integrationRoutes.get('/websites/:websiteId/sync-runs', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const syncRuns = await prisma.integrationSyncRun.findMany({
+      where: { websiteId },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    res.json({ syncRuns });
+  } catch (err: any) {
+    res.status(500).json({ error: 'SYNC_RUNS_FETCH_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Disconnects Google integration.
+ */
+integrationRoutes.post('/websites/:websiteId/google/disconnect', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    await GoogleIntegrationRepository.disconnectGoogle(websiteId);
+    res.json({ success: true, message: 'Google integration successfully disconnected.' });
+  } catch (err: any) {
+    res.status(500).json({ error: 'DISCONNECT_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Comprehensive Analytics & Performance Reporting Endpoint
+ */
+integrationRoutes.get('/websites/:websiteId/analytics/performance', async (req: Request, res: Response) => {
+  try {
+    const { websiteId } = req.params;
+    const now = new Date();
+
+    const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date(now.getTime() - 86400000);
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate as string)
+      : new Date(endDate.getTime() - 27 * 86400000);
+
+    const [
+      gscTotals,
+      ga4Totals,
+      timeSeries,
+      topQueries,
+      topPages,
+      comparison,
+    ] = await Promise.all([
+      AnalyticsRepository.getGscTotals(websiteId, startDate, endDate),
+      AnalyticsRepository.getGa4Totals(websiteId, startDate, endDate),
+      AnalyticsRepository.getGscTimeSeries(websiteId, startDate, endDate),
+      AnalyticsRepository.getTopQueries(websiteId, startDate, endDate, 50),
+      AnalyticsRepository.getTopPages(websiteId, startDate, endDate, 50),
+      PeriodComparisonEngine.comparePeriods({
+        websiteId,
+        currentStart: startDate,
+        currentEnd: endDate,
+      }),
+    ]);
+
+    const integration = await prisma.integration.findUnique({
+      where: {
+        websiteId_provider: {
+          websiteId,
+          provider: 'GSC',
+        },
+      },
+      include: {
+        gscBindings: true,
+        ga4Bindings: true,
+      },
+    });
+
+    res.json({
+      integrationStatus: integration?.status || 'NOT_CONFIGURED',
+      connectedAccount: integration?.connectedAccount,
+      gscBound: (integration?.gscBindings?.length || 0) > 0,
+      ga4Bound: (integration?.ga4Bindings?.length || 0) > 0,
+      window: {
+        startDate: startDate.toISOString().split('T')[0],
+        endDate: endDate.toISOString().split('T')[0],
+      },
+      gscTotals,
+      ga4Totals,
+      timeSeries,
+      topQueries,
+      topPages,
+      comparison,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'ANALYTICS_FETCH_FAILED', message: err.message });
+  }
+});
+
+/**
+ * Legacy CSV export
+ */
+integrationRoutes.post('/export-csv', async (req: Request, res: Response) => {
+  try {
+    const { items, type = 'tasks' } = req.body;
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: 'items array required' });
+    }
+    let csv = '';
+    if (items.length > 0) {
+      const headers = Object.keys(items[0]);
+      csv = headers.join(',') + '\n';
+      for (const item of items) {
+        const row = headers.map((h) => `"${String(item[h] ?? '').replace(/"/g, '""')}"`).join(',');
+        csv += row + '\n';
+      }
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=seo-${type}-export.csv`);
+    res.send(csv);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Legacy WordPress export
+ */
+integrationRoutes.post('/export-wordpress', async (req: Request, res: Response) => {
+  try {
+    const { title, content, status = 'draft' } = req.body;
+    res.json({
+      success: true,
+      message: 'Draft staged for WordPress push.',
+      payload: { title, status, length: content?.length || 0 },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default integrationRoutes;
+

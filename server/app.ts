@@ -60,6 +60,7 @@ export function createApp() {
   app.use('/api/content', contentRoutes);
   app.use('/api/websites', websiteRoutes);
   app.use('/api/integrations', integrationRoutes);
+  app.use('/api', integrationRoutes);
   app.use('/api/tasks', taskRoutes);
   app.use('/api/observability', observabilityRoutes);
 

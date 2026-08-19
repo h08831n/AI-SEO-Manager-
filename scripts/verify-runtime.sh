@@ -4,7 +4,7 @@ set -e
 # ==============================================================================
 # AI SEO MANAGER — REAL INFRASTRUCTURE RUNTIME VERIFICATION SUITE
 # ==============================================================================
-# This script executes the complete Phase 2 real-runtime acceptance gate against
+# This script executes the complete real-runtime acceptance gate against
 # live PostgreSQL (16) and Redis (7) instances.
 # ==============================================================================
 
@@ -36,7 +36,7 @@ done
 echo "[✓] Redis is healthy."
 
 # 2. Database Migration Deployment
-echo "[+] 3. Running real database migration (npx prisma migrate deploy)..."
+echo "[+] 3. Running real database migrations (npx prisma migrate deploy)..."
 DATABASE_URL="postgresql://postgres:postgres_dev_password@localhost:5432/ai_seo_manager?schema=public"
 export DATABASE_URL
 export REDIS_URL="redis://localhost:6379"
@@ -62,6 +62,13 @@ TABLES=(
   "audit_logs"
   "action_executions"
   "action_verifications"
+  "search_console_property_bindings"
+  "ga4_property_bindings"
+  "oauth_state_sessions"
+  "integration_sync_runs"
+  "gsc_search_analytics_facts"
+  "ga4_landing_page_daily"
+  "ga4_channel_daily"
 )
 
 for tbl in "${TABLES[@]}"; do
@@ -105,5 +112,5 @@ echo "[+] 6. Running comprehensive live integration and unit test suite..."
 npm test
 
 echo "================================================================="
-echo " [✓] PHASE 2 RUNTIME INFRASTRUCTURE VERIFICATION COMPLETED"
+echo " [✓] RUNTIME INFRASTRUCTURE VERIFICATION COMPLETED"
 echo "================================================================="

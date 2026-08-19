@@ -166,6 +166,12 @@ model Website {
   workspace        Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   settings         WebsiteSettings?
   integrations     Integration[]
+  gscBinding       SearchConsolePropertyBinding?
+  ga4Binding       Ga4PropertyBinding?
+  syncRuns         IntegrationSyncRun[]
+  gscFacts         GscSearchAnalyticsFact[]
+  ga4LandingPages  Ga4LandingPageDaily[]
+  ga4Channels      Ga4ChannelDaily[]
   urlIdentities    UrlIdentity[]
   crawlRuns        CrawlRun[]
   crawledPages     CrawledPage[]
@@ -198,26 +204,131 @@ model WebsiteSettings {
 }
 
 // ----------------------------------------------------
-// Integrations
+// Integrations & Google OAuth
 // ----------------------------------------------------
 
 model Integration {
-  id                   String              @id @default(uuid())
-  websiteId            String
-  provider             IntegrationProvider
-  status               IntegrationStatus   @default(NOT_CONFIGURED)
-  lastSyncAt           DateTime?
-  accountIdentifier    String?
-  message              String?
-  encryptedCredentials String?             // AES-256-GCM Encrypted JSON
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  id                      String              @id @default(uuid())
+  websiteId               String
+  provider                IntegrationProvider
+  status                  IntegrationStatus   @default(NOT_CONFIGURED)
+  lastSyncAt              DateTime?
+  accountIdentifier       String?
+  connectedAccount        String?
+  grantedScopes           String[]            @default([])
+  tokenExpiry             DateTime?
+  connectedAt             DateTime?
+  lastRefreshAt           DateTime?
+  lastSuccessfulApiCallAt DateTime?
+  lastError               String?
+  message                 String?
+  encryptedCredentials    String?             // AES-256-GCM Encrypted JSON
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
 
-  website              Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  website                 Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  gscBindings             SearchConsolePropertyBinding[]
+  ga4Bindings             Ga4PropertyBinding[]
+  syncRuns                IntegrationSyncRun[]
 
   @@unique([websiteId, provider])
   @@index([websiteId])
   @@map("integrations")
+}
+
+model SearchConsolePropertyBinding {
+  id                   String      @id @default(uuid())
+  websiteId            String      @unique
+  integrationId        String
+  providerPropertyId   String      // e.g. sc-domain:example.com or https://example.com/
+  providerPropertyType String      // DOMAIN or URL_PREFIX
+  permissionLevel      String      @default("SITE_RESTRICTED_USER")
+  verifiedAt           DateTime    @default(now())
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  website              Website     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  integration          Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([integrationId])
+  @@index([providerPropertyId])
+  @@map("search_console_property_bindings")
+}
+
+model Ga4PropertyBinding {
+  id                   String      @id @default(uuid())
+  websiteId            String      @unique
+  integrationId        String
+  providerAccountId    String?
+  providerAccountName  String?
+  providerPropertyId   String      // e.g. properties/123456789
+  providerDisplayName  String?
+  timeZone             String      @default("UTC")
+  currencyCode         String      @default("USD")
+  customKeyEvents      String[]    @default([])
+  verifiedAt           DateTime    @default(now())
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  website              Website     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  integration          Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([integrationId])
+  @@index([providerPropertyId])
+  @@map("ga4_property_bindings")
+}
+
+model OAuthStateSession {
+  id           String              @id @default(uuid())
+  state        String              @unique
+  codeVerifier String?
+  workspaceId  String
+  userId       String
+  websiteId    String?
+  provider     IntegrationProvider @default(GSC)
+  redirectUri  String
+  expiresAt    DateTime
+  usedAt       DateTime?
+  createdAt    DateTime            @default(now())
+
+  @@index([state, expiresAt])
+  @@index([workspaceId, userId])
+  @@map("oauth_state_sessions")
+}
+
+model IntegrationSyncRun {
+  id                 String              @id @default(uuid())
+  websiteId          String
+  integrationId      String
+  provider           IntegrationProvider
+  dataset            String              // SEARCH_ANALYTICS, LANDING_PAGE_DAILY, CHANNEL_DAILY
+  syncType           String              @default("INCREMENTAL_SYNC") // INITIAL_BACKFILL, INCREMENTAL_SYNC, MANUAL_RESYNC
+  requestedStartDate DateTime            @db.Date
+  requestedEndDate   DateTime            @db.Date
+  status             String              @default("PENDING") // PENDING, QUEUED, RUNNING, COMPLETED, COMPLETED_WITH_WARNINGS, FAILED, CANCELLED
+  rowsFetched        Int                 @default(0)
+  rowsUpserted       Int                 @default(0)
+  pagesFetched       Int                 @default(0)
+  startedAt          DateTime?
+  completedAt        DateTime?
+  lastCursor         String?
+  errorCode          String?
+  errorMessage       String?
+  retrievedAt        DateTime?
+  correlationId      String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  website            Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  integration        Integration         @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  gscFacts           GscSearchAnalyticsFact[]
+  ga4LandingPages    Ga4LandingPageDaily[]
+  ga4Channels        Ga4ChannelDaily[]
+
+  @@index([websiteId, status])
+  @@index([integrationId, provider])
+  @@index([websiteId, requestedStartDate, requestedEndDate])
+  @@map("integration_sync_runs")
 }
 
 // ----------------------------------------------------
@@ -239,7 +350,9 @@ model UrlIdentity {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
-  website           Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  website           Website                  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  gscFacts          GscSearchAnalyticsFact[]
+  ga4LandingPages   Ga4LandingPageDaily[]
 
   @@unique([websiteId, normalizedUrl])
   @@index([websiteId, isOrphanCandidate])
@@ -461,6 +574,100 @@ model SearchAnalyticsDaily {
   @@index([websiteId, query])
   @@index([websiteId, page])
   @@map("search_analytics_daily")
+}
+
+model GscSearchAnalyticsFact {
+  id               String              @id @default(uuid())
+  websiteId        String
+  syncRunId        String?
+  urlIdentityId    String?
+  date             DateTime            @db.Date
+  grain            String              @default("SITE_DAILY") // SITE_DAILY, PAGE_DAILY, QUERY_DAILY, PAGE_QUERY_DAILY, COUNTRY_DAILY, DEVICE_DAILY
+  pageUrl          String?
+  query            String?
+  country          String              @default("GLOBAL")
+  device           String              @default("ALL") // ALL, DESKTOP, MOBILE, TABLET
+  searchType       String              @default("WEB") // WEB, IMAGE, VIDEO, NEWS, DISCOVER, GOOGLE_NEWS
+  searchAppearance String?
+  dataState        String              @default("FINALIZED") // FINALIZED, FRESH, HOURLY_PARTIAL
+  clicks           Int                 @default(0)
+  impressions      Int                 @default(0)
+  ctr              Float               @default(0)
+  position         Float               @default(0)
+  provenance       String              @default("MEASURED_PROVIDER") // MEASURED_PROVIDER, CALCULATED
+  urlMatchStatus   String              @default("MATCHED_URL_IDENTITY") // MATCHED_URL_IDENTITY, NORMALIZED_MATCH, UNMATCHED_PROVIDER_URL, EXTERNAL_OR_OUT_OF_SCOPE
+  retrievedAt      DateTime            @default(now())
+
+  website          Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  syncRun          IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
+  urlIdentity      UrlIdentity?        @relation(fields: [urlIdentityId], references: [id], onDelete: SetNull)
+
+  @@unique([websiteId, date, grain, pageUrl, query, country, device, searchType])
+  @@index([websiteId, date])
+  @@index([websiteId, grain, date])
+  @@index([websiteId, pageUrl, date])
+  @@index([websiteId, query, date])
+  @@index([syncRunId])
+  @@index([urlIdentityId])
+  @@map("gsc_search_analytics_facts")
+}
+
+model Ga4LandingPageDaily {
+  id               String              @id @default(uuid())
+  websiteId        String
+  syncRunId        String?
+  urlIdentityId    String?
+  date             DateTime            @db.Date
+  landingPageUrl   String
+  channelGroup     String              @default("Organic Search")
+  sessions         Int                 @default(0)
+  engagedSessions  Int                 @default(0)
+  activeUsers      Int                 @default(0)
+  newUsers         Int                 @default(0)
+  keyEvents        Int                 @default(0)
+  totalRevenue     Float               @default(0)
+  currency         String              @default("USD")
+  dataState        String              @default("FINALIZED")
+  provenance       String              @default("MEASURED_PROVIDER")
+  urlMatchStatus   String              @default("MATCHED_URL_IDENTITY")
+  retrievedAt      DateTime            @default(now())
+
+  website          Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  syncRun          IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
+  urlIdentity      UrlIdentity?        @relation(fields: [urlIdentityId], references: [id], onDelete: SetNull)
+
+  @@unique([websiteId, date, landingPageUrl, channelGroup])
+  @@index([websiteId, date])
+  @@index([websiteId, landingPageUrl, date])
+  @@index([syncRunId])
+  @@index([urlIdentityId])
+  @@map("ga4_landing_page_daily")
+}
+
+model Ga4ChannelDaily {
+  id                  String              @id @default(uuid())
+  websiteId           String
+  syncRunId           String?
+  date                DateTime            @db.Date
+  defaultChannelGroup String
+  sessions            Int                 @default(0)
+  engagedSessions     Int                 @default(0)
+  users               Int                 @default(0)
+  newUsers            Int                 @default(0)
+  keyEvents           Int                 @default(0)
+  totalRevenue        Float               @default(0)
+  currency            String              @default("USD")
+  dataState           String              @default("FINALIZED")
+  provenance          String              @default("MEASURED_PROVIDER")
+  retrievedAt         DateTime            @default(now())
+
+  website             Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  syncRun             IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
+
+  @@unique([websiteId, date, defaultChannelGroup])
+  @@index([websiteId, date])
+  @@index([syncRunId])
+  @@map("ga4_channel_daily")
 }
 
 // ----------------------------------------------------

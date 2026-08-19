@@ -1,12 +1,14 @@
 import { startBackgroundWorker } from './services/worker/backgroundWorker';
 import { CrawlerQueueConsumer } from './queues/crawlerQueueConsumer';
+import { SyncQueueConsumer } from './queues/syncQueueConsumer';
 import { OutboxDispatcher } from './services/outbox/outboxDispatcher';
 import { recordWorkerHeartbeat } from './routes/observabilityRoutes';
 
 console.log('[Worker Process] Initializing Autonomous SEO Worker Runtime, Consumer & Outbox Dispatcher...');
 
-// 1. Initialize BullMQ Crawler Consumer Worker
+// 1. Initialize BullMQ Crawler Consumer Worker & Integration Sync Consumer
 CrawlerQueueConsumer.initialize();
+SyncQueueConsumer.start();
 
 // 2. Start Transactional Outbox Polling
 OutboxDispatcher.startPolling(2000);
@@ -26,6 +28,7 @@ const shutdown = async (signal: string) => {
   OutboxDispatcher.stopPolling();
   try {
     await CrawlerQueueConsumer.shutdown();
+    await SyncQueueConsumer.stop();
     await workerRuntime.stop();
     console.log('[Worker Process] Worker shutdown completed.');
     process.exit(0);
