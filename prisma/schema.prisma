@@ -3,6 +3,7 @@
 
 generator client {
   provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
 }
 
 datasource db {
@@ -291,6 +292,7 @@ model CrawlFrontierEntry {
   attemptCount    Int            @default(0)
   lastError       String?
   nextAttemptAt   DateTime?
+  lockedUntil     DateTime?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
 
@@ -748,6 +750,7 @@ model OutboxEvent {
   payloadJson   String
   status        OutboxStatus @default(PENDING)
   attemptCount  Int          @default(0)
+  lockedUntil   DateTime?
   lastError     String?
   nextAttemptAt DateTime?
   deliveredAt   DateTime?

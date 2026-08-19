@@ -178,6 +178,8 @@ CREATE TABLE "crawl_frontier_entries" (
     "parentUrl" TEXT,
     "attemptCount" INTEGER NOT NULL DEFAULT 0,
     "lastError" TEXT,
+    "nextAttemptAt" TIMESTAMP(3),
+    "lockedUntil" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -532,6 +534,7 @@ CREATE TABLE "outbox_events" (
     "payloadJson" TEXT NOT NULL,
     "status" "OutboxStatus" NOT NULL DEFAULT 'PENDING',
     "attemptCount" INTEGER NOT NULL DEFAULT 0,
+    "lockedUntil" TIMESTAMP(3),
     "lastError" TEXT,
     "nextAttemptAt" TIMESTAMP(3),
     "deliveredAt" TIMESTAMP(3),

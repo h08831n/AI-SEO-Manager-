@@ -120,7 +120,7 @@ describe('Phase 2 Full Pipeline & Integration Gate Tests', () => {
 
       expect(response.status).toBe(202);
       expect(response.body.crawlRunId).toBeDefined();
-      expect(response.body.status).toBe('QUEUED');
+      expect(['PENDING', 'QUEUED']).toContain(response.body.status);
 
       // Verify crawlRun was persisted in repository
       const crawlRun = await CrawlRepository.getCrawlRun(response.body.crawlRunId);

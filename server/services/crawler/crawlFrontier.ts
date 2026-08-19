@@ -100,42 +100,65 @@ export class CrawlFrontier {
 
     if (prisma) {
       try {
-        const now = new Date();
-        const next = await prisma.crawlFrontierEntry.findFirst({
-          where: {
-            crawlRunId: this.crawlRunId,
-            status: { in: ['DISCOVERED', 'QUEUED'] },
-            OR: [
-              { nextAttemptAt: null },
-              { nextAttemptAt: { lte: now } },
-            ],
-          },
-          orderBy: [
-            { priority: 'desc' },
-            { depth: 'asc' },
-            { createdAt: 'asc' },
-          ],
+        const claimed = await prisma.$transaction(async (tx) => {
+          const rows = await tx.$queryRaw<Array<{
+            id: string;
+            crawlRunId: string;
+            url: string;
+            normalizedUrl: string;
+            depth: number;
+            priority: number;
+            status: FrontierStatus;
+            discoverySource: string;
+            parentUrl: string | null;
+            attemptCount: number;
+            lastError: string | null;
+            nextAttemptAt: Date | null;
+            createdAt: Date;
+          }>>`
+            SELECT id, "crawlRunId", url, "normalizedUrl", depth, priority, status, "discoverySource", "parentUrl", "attemptCount", "lastError", "nextAttemptAt", "createdAt"
+            FROM "crawl_frontier_entries"
+            WHERE "crawlRunId" = ${this.crawlRunId}
+              AND (status = 'DISCOVERED' OR status = 'QUEUED' OR (status = 'FETCHING' AND "lockedUntil" < NOW()))
+              AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= NOW())
+            ORDER BY priority DESC, depth ASC, "createdAt" ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED;
+          `;
+
+          if (rows.length === 0) {
+            return null;
+          }
+
+          const selected = rows[0];
+          const lockExpiry = new Date(Date.now() + 60000);
+
+          await tx.crawlFrontierEntry.update({
+            where: { id: selected.id },
+            data: {
+              status: 'FETCHING',
+              lockedUntil: lockExpiry,
+            },
+          });
+
+          return selected;
         });
 
-        if (next) {
-          const updated = await prisma.crawlFrontierEntry.update({
-            where: { id: next.id },
-            data: { status: 'FETCHING' },
-          });
+        if (claimed) {
           return {
-            id: updated.id,
-            crawlRunId: updated.crawlRunId,
-            url: updated.url,
-            normalizedUrl: updated.normalizedUrl,
-            depth: updated.depth,
-            priority: updated.priority,
-            status: updated.status,
-            discoverySource: updated.discoverySource,
-            parentUrl: updated.parentUrl || undefined,
-            attemptCount: updated.attemptCount,
-            lastError: updated.lastError || undefined,
-            nextAttemptAt: updated.nextAttemptAt ? updated.nextAttemptAt.toISOString() : undefined,
-            createdAt: updated.createdAt.toISOString(),
+            id: claimed.id,
+            crawlRunId: claimed.crawlRunId,
+            url: claimed.url,
+            normalizedUrl: claimed.normalizedUrl,
+            depth: claimed.depth,
+            priority: claimed.priority,
+            status: 'FETCHING',
+            discoverySource: claimed.discoverySource,
+            parentUrl: claimed.parentUrl || undefined,
+            attemptCount: claimed.attemptCount,
+            lastError: claimed.lastError || undefined,
+            nextAttemptAt: claimed.nextAttemptAt ? claimed.nextAttemptAt.toISOString() : undefined,
+            createdAt: claimed.createdAt.toISOString(),
           };
         }
         return undefined;

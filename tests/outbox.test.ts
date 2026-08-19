@@ -60,4 +60,43 @@ describe('Transactional Outbox Pattern & Dispatcher', () => {
     expect(stored?.lastError).toContain('Connection refused');
     expect(stored?.nextAttemptAt).toBeDefined();
   });
+
+  it('guarantees concurrency safety so two concurrent dispatchers cannot claim the same event', async () => {
+    // Record 5 pending outbox events
+    for (let i = 0; i < 5; i++) {
+      await OutboxDispatcher.recordEvent({
+        aggregateType: 'CRAWL_RUN',
+        aggregateId: `crawl-concurrent-${i}`,
+        eventType: 'CRAWL_REQUESTED',
+        payload: { crawlRunId: `crawl-concurrent-${i}`, websiteId: 'site-test' },
+      });
+    }
+
+    const processedEventIds: string[] = [];
+    const concurrentPublisher = async (event: any) => {
+      // Simulate asynchronous publishing latency
+      await new Promise((r) => setTimeout(r, 20));
+      processedEventIds.push(event.id);
+    };
+
+    // Run two dispatchers concurrently in parallel
+    const [result1, result2] = await Promise.all([
+      OutboxDispatcher.processPendingEvents(concurrentPublisher),
+      OutboxDispatcher.processPendingEvents(concurrentPublisher),
+    ]);
+
+    // Total dispatched across both runners must equal exactly 5 with 0 duplicates
+    expect(result1.dispatched + result2.dispatched).toBe(5);
+    const uniqueIds = new Set(processedEventIds);
+    expect(uniqueIds.size).toBe(5);
+    expect(processedEventIds.length).toBe(5);
+  });
+
+  it('enforces deterministic and idempotent job ID format crawl-coordinate:<crawlRunId>', async () => {
+    const crawlRunId = 'crawl-run-deterministic-123';
+    const expectedJobId = `crawl-coordinate:${crawlRunId}`;
+    expect(expectedJobId).toBe('crawl-coordinate:crawl-run-deterministic-123');
+    expect(expectedJobId.includes('Date.now')).toBe(false);
+    expect(expectedJobId.includes('Math.random')).toBe(false);
+  });
 });

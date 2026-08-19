@@ -187,6 +187,9 @@ export class OutboxDispatcher {
     }
   }
 
+  private static readonly MAX_ATTEMPTS = 5;
+  private static readonly BATCH_SIZE = 20;
+
   public static async processPendingEvents(
     customPublisher?: (event: OutboxEventRecord) => Promise<boolean | void>
   ): Promise<{ dispatched: number; failed: number }> {
@@ -197,28 +200,59 @@ export class OutboxDispatcher {
 
     if (prisma) {
       try {
-        const pendingEvents = await prisma.outboxEvent.findMany({
-          where: {
-            status: 'PENDING',
-            attemptCount: { lt: 5 },
-          },
-          orderBy: { createdAt: 'asc' },
-          take: 20,
+        // 1. Durably claim batch inside atomic database transaction with FOR UPDATE SKIP LOCKED
+        const claimedEvents = await prisma.$transaction(async (tx) => {
+          const rows = await tx.$queryRaw<Array<{
+            id: string;
+            aggregateType: string;
+            aggregateId: string;
+            eventType: string;
+            payloadJson: string;
+            attemptCount: number;
+          }>>`
+            SELECT id, "aggregateType", "aggregateId", "eventType", "payloadJson", "attemptCount"
+            FROM "outbox_events"
+            WHERE (status = 'PENDING' OR (status = 'PROCESSING' AND "lockedUntil" < NOW()))
+              AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= NOW())
+              AND "attemptCount" < ${this.MAX_ATTEMPTS}
+            ORDER BY "createdAt" ASC
+            LIMIT ${this.BATCH_SIZE}
+            FOR UPDATE SKIP LOCKED;
+          `;
+
+          if (rows.length === 0) {
+            return [];
+          }
+
+          const ids = rows.map((r) => r.id);
+          const lockExpiry = new Date(Date.now() + 60000); // 60s lease
+
+          await tx.outboxEvent.updateMany({
+            where: { id: { in: ids } },
+            data: {
+              status: 'PROCESSING',
+              lockedUntil: lockExpiry,
+              attemptCount: { increment: 1 },
+            },
+          });
+
+          return rows;
         });
 
-        for (const ev of pendingEvents) {
+        // 2. Publish claimed events outside the transaction
+        for (const ev of claimedEvents) {
           const record: OutboxEventRecord = {
             id: ev.id,
             aggregateType: ev.aggregateType,
             aggregateId: ev.aggregateId,
             eventType: ev.eventType,
             payloadJson: ev.payloadJson,
-            status: ev.status,
-            attemptCount: ev.attemptCount,
-            lastError: ev.lastError,
-            nextAttemptAt: ev.nextAttemptAt,
-            deliveredAt: ev.deliveredAt,
-            createdAt: ev.createdAt,
+            status: 'PROCESSING',
+            attemptCount: ev.attemptCount + 1,
+            lastError: null,
+            nextAttemptAt: null,
+            deliveredAt: null,
+            createdAt: new Date(),
           };
 
           try {
@@ -228,11 +262,13 @@ export class OutboxDispatcher {
               await this.processSingleEvent(ev.id, ev.eventType, JSON.parse(ev.payloadJson));
             }
 
+            // Mark DELIVERED on success
             await prisma.outboxEvent.update({
               where: { id: ev.id },
               data: {
                 status: 'DELIVERED',
                 deliveredAt: new Date(),
+                lockedUntil: null,
               },
             });
             dispatched++;
@@ -243,24 +279,41 @@ export class OutboxDispatcher {
             await prisma.outboxEvent.update({
               where: { id: ev.id },
               data: {
-                attemptCount: newAttempt,
+                status: newAttempt >= this.MAX_ATTEMPTS ? 'FAILED' : 'PENDING',
                 lastError: dispatchErr.message,
-                status: newAttempt >= 5 ? 'FAILED' : 'PENDING',
                 nextAttemptAt: nextAttempt,
+                lockedUntil: null,
               },
             });
           }
         }
 
         return { dispatched, failed };
-      } catch {
-        // fallback to memory
+      } catch (dbErr) {
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: Outbox transaction failed: ${dbErr}`);
+        }
       }
     }
 
-    // In-memory fallback
-    const pending = this.inMemoryStore.filter((e) => e.status === 'PENDING' && e.attemptCount < 5);
-    for (const ev of pending) {
+    // In-memory atomic claiming for TEST/DEV mode
+    const now = Date.now();
+    const claimedMemory: OutboxEventRecord[] = [];
+
+    for (const ev of this.inMemoryStore) {
+      const isExpiredLock = ev.status === 'PROCESSING' && ev.nextAttemptAt && ev.nextAttemptAt.getTime() <= now;
+      if (
+        (ev.status === 'PENDING' || isExpiredLock) &&
+        ev.attemptCount < this.MAX_ATTEMPTS
+      ) {
+        ev.status = 'PROCESSING';
+        ev.attemptCount += 1;
+        ev.nextAttemptAt = new Date(now + 60000); // 60s lock lease
+        claimedMemory.push(ev);
+      }
+    }
+
+    for (const ev of claimedMemory) {
       try {
         if (customPublisher) {
           await customPublisher(ev);
@@ -272,9 +325,8 @@ export class OutboxDispatcher {
         dispatched++;
       } catch (err: any) {
         failed++;
-        ev.attemptCount += 1;
         ev.lastError = err.message;
-        ev.status = ev.attemptCount >= 5 ? 'FAILED' : 'PENDING';
+        ev.status = ev.attemptCount >= this.MAX_ATTEMPTS ? 'FAILED' : 'PENDING';
         ev.nextAttemptAt = new Date(Date.now() + 1000 * Math.pow(2, ev.attemptCount));
       }
     }
