@@ -4,7 +4,7 @@ import { createApp } from './server/app';
 
 async function startServer() {
   const app = createApp();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   // Mount Vite Middleware for development and static fallback for production
   if (process.env.NODE_ENV !== 'production') {

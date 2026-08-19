@@ -1,13 +1,13 @@
 import { SafeUrlPolicy } from '../../security/safeUrlPolicy';
 
-export interface RobotsRule {
-  userAgent: string;
+export interface RobotsRuleGroup {
+  userAgents: string[];
   allow: string[];
   disallow: string[];
 }
 
 export interface ParsedRobotsTxt {
-  rules: RobotsRule[];
+  ruleGroups: RobotsRuleGroup[];
   sitemaps: string[];
   crawlDelay?: number;
   rawContent: string;
@@ -37,18 +37,18 @@ export class RobotsService {
         return { parsed, fetchStatus: 200 };
       } else if (res.statusCode === 404 || res.statusCode === 410) {
         return {
-          parsed: { rules: [], sitemaps: [], rawContent: '' },
+          parsed: { ruleGroups: [], sitemaps: [], rawContent: '' },
           fetchStatus: res.statusCode,
         };
       } else {
         return {
-          parsed: { rules: [], sitemaps: [], rawContent: '' },
+          parsed: { ruleGroups: [], sitemaps: [], rawContent: '' },
           fetchStatus: res.statusCode,
         };
       }
     } catch (err: any) {
       return {
-        parsed: { rules: [], sitemaps: [], rawContent: '' },
+        parsed: { ruleGroups: [], sitemaps: [], rawContent: '' },
         fetchStatus: 0,
         error: err.message,
       };
@@ -56,14 +56,15 @@ export class RobotsService {
   }
 
   /**
-   * Parses raw robots.txt content according to RFC 9309 rules
+   * Parses raw robots.txt content according to RFC 9309 rules (grouping consecutive User-agent lines)
    */
   public static parseRobotsTxt(content: string): ParsedRobotsTxt {
     const lines = content.split(/\r?\n/);
-    const rules: RobotsRule[] = [];
+    const ruleGroups: RobotsRuleGroup[] = [];
     const sitemaps: string[] = [];
-    let currentRule: RobotsRule | null = null;
+    let currentGroup: RobotsRuleGroup | null = null;
     let crawlDelay: number | undefined;
+    let isPreviousLineUserAgent = false;
 
     for (const rawLine of lines) {
       const line = rawLine.split('#')[0].trim();
@@ -77,32 +78,45 @@ export class RobotsService {
 
       if (directive === 'user-agent') {
         const ua = value.toLowerCase();
-        currentRule = { userAgent: ua, allow: [], disallow: [] };
-        rules.push(currentRule);
-      } else if (directive === 'disallow' && currentRule) {
-        if (value) currentRule.disallow.push(value);
-      } else if (directive === 'allow' && currentRule) {
-        if (value) currentRule.allow.push(value);
-      } else if (directive === 'sitemap') {
-        if (value) sitemaps.push(value);
-      } else if (directive === 'crawl-delay') {
-        const parsedDelay = parseFloat(value);
-        if (!isNaN(parsedDelay)) crawlDelay = parsedDelay;
+        if (isPreviousLineUserAgent && currentGroup) {
+          // Consecutive User-agent line belongs to the same rule group
+          if (!currentGroup.userAgents.includes(ua)) {
+            currentGroup.userAgents.push(ua);
+          }
+        } else {
+          // New rule group
+          currentGroup = { userAgents: [ua], allow: [], disallow: [] };
+          ruleGroups.push(currentGroup);
+        }
+        isPreviousLineUserAgent = true;
+      } else {
+        isPreviousLineUserAgent = false;
+
+        if (directive === 'disallow' && currentGroup) {
+          if (value) currentGroup.disallow.push(value);
+        } else if (directive === 'allow' && currentGroup) {
+          if (value) currentGroup.allow.push(value);
+        } else if (directive === 'sitemap') {
+          if (value && !sitemaps.includes(value)) sitemaps.push(value);
+        } else if (directive === 'crawl-delay') {
+          const parsedDelay = parseFloat(value);
+          if (!isNaN(parsedDelay)) crawlDelay = parsedDelay;
+        }
       }
     }
 
-    return { rules, sitemaps, crawlDelay, rawContent: content };
+    return { ruleGroups, sitemaps, crawlDelay, rawContent: content };
   }
 
   /**
-   * Evaluates if a given URL is allowed for a user-agent according to longest-match rule in RFC 9309
+   * Evaluates if a given URL is allowed for a user-agent according to RFC 9309 (longest match in most specific group)
    */
   public static isAllowed(
     parsedRobots: ParsedRobotsTxt,
     urlToCheck: string,
     userAgent = 'AISEOManagerBot'
   ): { allowed: boolean; matchedRule?: string } {
-    if (!parsedRobots || parsedRobots.rules.length === 0) {
+    if (!parsedRobots || parsedRobots.ruleGroups.length === 0) {
       return { allowed: true };
     }
 
@@ -116,32 +130,37 @@ export class RobotsService {
     const pathAndQuery = `${parsed.pathname}${parsed.search}`;
     const targetUa = userAgent.toLowerCase();
 
-    // 1. Find matching rules for specific UA, fallback to '*'
-    const matchedRules = parsedRobots.rules.filter(
-      (r) => targetUa.includes(r.userAgent) || r.userAgent === '*'
-    );
+    // 1. Find matching rule group by specificity
+    let bestGroup: RobotsRuleGroup | null = null;
+    let bestGroupMatchLength = -1;
+    let wildcardGroup: RobotsRuleGroup | null = null;
 
-    if (matchedRules.length === 0) {
+    for (const group of parsedRobots.ruleGroups) {
+      for (const ua of group.userAgents) {
+        if (ua === '*') {
+          wildcardGroup = group;
+        } else if (targetUa.includes(ua) || ua.includes(targetUa)) {
+          if (ua.length > bestGroupMatchLength) {
+            bestGroupMatchLength = ua.length;
+            bestGroup = group;
+          }
+        }
+      }
+    }
+
+    const activeGroup = bestGroup || wildcardGroup;
+    if (!activeGroup) {
       return { allowed: true };
     }
 
-    // Sort: specific UA takes precedence over wildcard '*'
-    matchedRules.sort((a, b) => {
-      if (a.userAgent === '*' && b.userAgent !== '*') return 1;
-      if (a.userAgent !== '*' && b.userAgent === '*') return -1;
-      return 0;
-    });
-
-    const activeRule = matchedRules[0];
-
-    // RFC 9309: Longest matching rule wins. If length tie, ALLOW wins.
+    // 2. RFC 9309: Longest matching path rule in active group wins. If tie, ALLOW wins.
     let longestMatchLen = -1;
     let allowedByLongestMatch = true;
     let matchedDirective = '';
 
-    for (const allowPattern of activeRule.allow) {
+    for (const allowPattern of activeGroup.allow) {
       if (this.pathMatches(pathAndQuery, allowPattern)) {
-        if (allowPattern.length >= longestMatchLen) { // Tie-break: Allow wins or takes precedence
+        if (allowPattern.length >= longestMatchLen) {
           longestMatchLen = allowPattern.length;
           allowedByLongestMatch = true;
           matchedDirective = `Allow: ${allowPattern}`;
@@ -149,9 +168,9 @@ export class RobotsService {
       }
     }
 
-    for (const disallowPattern of activeRule.disallow) {
+    for (const disallowPattern of activeGroup.disallow) {
       if (this.pathMatches(pathAndQuery, disallowPattern)) {
-        if (disallowPattern.length > longestMatchLen) { // Strict inequality so Allow wins ties
+        if (disallowPattern.length > longestMatchLen) { // Strict inequality ensures Allow wins tie
           longestMatchLen = disallowPattern.length;
           allowedByLongestMatch = false;
           matchedDirective = `Disallow: ${disallowPattern}`;

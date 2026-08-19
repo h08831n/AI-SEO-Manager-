@@ -1,5 +1,6 @@
 import { CrawlRunLifecycle } from '@prisma/client';
 import { getPrismaClient } from '../db/prismaClient';
+import { isProductionMode } from '../config/runtimeMode';
 
 export interface CrawlRunRecord {
   id: string;
@@ -7,8 +8,8 @@ export interface CrawlRunRecord {
   status: CrawlRunLifecycle;
   seedUrl: string;
   configJson: string;
-  startedAt: string;
-  completedAt?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
   durationMs?: number;
   totalPages: number;
   totalIssues: number;
@@ -105,6 +106,8 @@ export interface CrawlIssueRecord {
 export interface InternalLinkEdgeRecord {
   id: string;
   crawlRunId: string;
+  sourceUrlIdentityId?: string;
+  targetUrlIdentityId?: string;
   sourceUrl: string;
   targetUrl: string;
   normalizedTarget: string;
@@ -132,7 +135,7 @@ export interface SeoEventRecord {
   detectedAt: string;
 }
 
-// In-Memory Store for DEV/TEST
+// In-Memory Store for DEV/TEST fallback
 const devUrlIdentities: Map<string, UrlIdentityRecord> = new Map();
 const devCrawlRuns: Map<string, CrawlRunRecord> = new Map();
 const devCrawledPages: Map<string, CrawledPageRecord[]> = new Map();
@@ -209,7 +212,7 @@ export class CrawlRepository {
           isOrphanCandidate: created.isOrphanCandidate,
         };
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
+        if (isProductionMode()) {
           throw new Error(`PERSISTENCE_UNAVAILABLE: UrlIdentity write failed: ${err}`);
         }
       }
@@ -246,11 +249,13 @@ export class CrawlRepository {
     websiteId: string;
     seedUrl: string;
     config: any;
+    status?: CrawlRunLifecycle;
     triggerSource?: string;
   }): Promise<CrawlRunRecord> {
     const prisma = getPrismaClient();
     const id = `crawl-run-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const configJson = JSON.stringify(params.config);
+    const initialStatus: CrawlRunLifecycle = params.status || 'PENDING';
 
     if (prisma) {
       try {
@@ -258,7 +263,7 @@ export class CrawlRepository {
           data: {
             id,
             websiteId: params.websiteId,
-            status: 'RUNNING',
+            status: initialStatus,
             seedUrl: params.seedUrl,
             configJson,
             triggerSource: params.triggerSource || 'MANUAL',
@@ -266,25 +271,41 @@ export class CrawlRepository {
             urlsQueued: 1,
           },
         });
-        return record as unknown as CrawlRunRecord;
+        return {
+          id: record.id,
+          websiteId: record.websiteId,
+          status: record.status,
+          seedUrl: record.seedUrl,
+          configJson: record.configJson,
+          startedAt: record.startedAt ? record.startedAt.toISOString() : undefined,
+          completedAt: record.completedAt ? record.completedAt.toISOString() : undefined,
+          durationMs: record.durationMs || undefined,
+          totalPages: record.totalPages,
+          totalIssues: record.totalIssues,
+          urlsDiscovered: record.urlsDiscovered,
+          urlsQueued: record.urlsQueued,
+          urlsFetched: record.urlsFetched,
+          urlsSkipped: record.urlsSkipped,
+          urlsFailed: record.urlsFailed,
+          robotsTxtStatus: record.robotsTxtStatus || undefined,
+          robotsTxtHash: record.robotsTxtHash || undefined,
+          sitemapsDiscovered: record.sitemapsDiscovered,
+          triggerSource: record.triggerSource,
+        };
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(`PERSISTENCE_UNAVAILABLE: Database write failed in production mode: ${err}`);
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: Database write failed: ${err}`);
         }
       }
-    }
-
-    if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
-      throw new Error('PERSISTENCE_UNAVAILABLE: PostgreSQL required in production but unreachable');
     }
 
     const devRecord: CrawlRunRecord = {
       id,
       websiteId: params.websiteId,
-      status: 'RUNNING',
+      status: initialStatus,
       seedUrl: params.seedUrl,
       configJson,
-      startedAt: new Date().toISOString(),
+      startedAt: initialStatus === 'RUNNING' ? new Date().toISOString() : undefined,
       totalPages: 0,
       totalIssues: 0,
       urlsDiscovered: 1,
@@ -308,14 +329,38 @@ export class CrawlRepository {
 
     if (prisma) {
       try {
+        const dataToUpdate: any = { ...updates };
+        if (updates.startedAt) dataToUpdate.startedAt = new Date(updates.startedAt);
+        if (updates.completedAt) dataToUpdate.completedAt = new Date(updates.completedAt);
+
         const updated = await prisma.crawlRun.update({
           where: { id },
-          data: updates as any,
+          data: dataToUpdate,
         });
-        return updated as unknown as CrawlRunRecord;
+        return {
+          id: updated.id,
+          websiteId: updated.websiteId,
+          status: updated.status,
+          seedUrl: updated.seedUrl,
+          configJson: updated.configJson,
+          startedAt: updated.startedAt ? updated.startedAt.toISOString() : undefined,
+          completedAt: updated.completedAt ? updated.completedAt.toISOString() : undefined,
+          durationMs: updated.durationMs || undefined,
+          totalPages: updated.totalPages,
+          totalIssues: updated.totalIssues,
+          urlsDiscovered: updated.urlsDiscovered,
+          urlsQueued: updated.urlsQueued,
+          urlsFetched: updated.urlsFetched,
+          urlsSkipped: updated.urlsSkipped,
+          urlsFailed: updated.urlsFailed,
+          robotsTxtStatus: updated.robotsTxtStatus || undefined,
+          robotsTxtHash: updated.robotsTxtHash || undefined,
+          sitemapsDiscovered: updated.sitemapsDiscovered,
+          triggerSource: updated.triggerSource,
+        };
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(`PERSISTENCE_UNAVAILABLE: ${err}`);
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: updateCrawlRun failed: ${err}`);
         }
       }
     }
@@ -333,7 +378,29 @@ export class CrawlRepository {
     if (prisma) {
       try {
         const res = await prisma.crawlRun.findUnique({ where: { id } });
-        if (res) return res as unknown as CrawlRunRecord;
+        if (res) {
+          return {
+            id: res.id,
+            websiteId: res.websiteId,
+            status: res.status,
+            seedUrl: res.seedUrl,
+            configJson: res.configJson,
+            startedAt: res.startedAt ? res.startedAt.toISOString() : undefined,
+            completedAt: res.completedAt ? res.completedAt.toISOString() : undefined,
+            durationMs: res.durationMs || undefined,
+            totalPages: res.totalPages,
+            totalIssues: res.totalIssues,
+            urlsDiscovered: res.urlsDiscovered,
+            urlsQueued: res.urlsQueued,
+            urlsFetched: res.urlsFetched,
+            urlsSkipped: res.urlsSkipped,
+            urlsFailed: res.urlsFailed,
+            robotsTxtStatus: res.robotsTxtStatus || undefined,
+            robotsTxtHash: res.robotsTxtHash || undefined,
+            sitemapsDiscovered: res.sitemapsDiscovered,
+            triggerSource: res.triggerSource,
+          };
+        }
       } catch {
         // Fallback
       }
@@ -341,22 +408,63 @@ export class CrawlRepository {
     return devCrawlRuns.get(id) || null;
   }
 
-  public static async listCrawlRuns(websiteId: string): Promise<CrawlRunRecord[]> {
+  public static async listCrawlRuns(
+    websiteId: string,
+    options: { offset?: number; limit?: number; status?: CrawlRunLifecycle } = {}
+  ): Promise<{ total: number; runs: CrawlRunRecord[] }> {
+    const { offset = 0, limit = 50, status } = options;
     const prisma = getPrismaClient();
+
     if (prisma) {
       try {
+        const where: any = { websiteId };
+        if (status) where.status = status;
+
+        const total = await prisma.crawlRun.count({ where });
         const res = await prisma.crawlRun.findMany({
-          where: { websiteId },
+          where,
           orderBy: { startedAt: 'desc' },
+          skip: offset,
+          take: limit,
         });
-        return res as unknown as CrawlRunRecord[];
+
+        return {
+          total,
+          runs: res.map((r) => ({
+            id: r.id,
+            websiteId: r.websiteId,
+            status: r.status,
+            seedUrl: r.seedUrl,
+            configJson: r.configJson,
+            startedAt: r.startedAt ? r.startedAt.toISOString() : undefined,
+            completedAt: r.completedAt ? r.completedAt.toISOString() : undefined,
+            durationMs: r.durationMs || undefined,
+            totalPages: r.totalPages,
+            totalIssues: r.totalIssues,
+            urlsDiscovered: r.urlsDiscovered,
+            urlsQueued: r.urlsQueued,
+            urlsFetched: r.urlsFetched,
+            urlsSkipped: r.urlsSkipped,
+            urlsFailed: r.urlsFailed,
+            robotsTxtStatus: r.robotsTxtStatus || undefined,
+            robotsTxtHash: r.robotsTxtHash || undefined,
+            sitemapsDiscovered: r.sitemapsDiscovered,
+            triggerSource: r.triggerSource,
+          })),
+        };
       } catch {
         // Fallback
       }
     }
-    return Array.from(devCrawlRuns.values())
-      .filter((r) => r.websiteId === websiteId)
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+
+    const all = Array.from(devCrawlRuns.values())
+      .filter((r) => r.websiteId === websiteId && (!status || r.status === status))
+      .sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
+
+    return {
+      total: all.length,
+      runs: all.slice(offset, offset + limit),
+    };
   }
 
   public static async saveCrawledPagesBatch(
@@ -384,8 +492,8 @@ export class CrawlRepository {
         });
         return;
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(`PERSISTENCE_UNAVAILABLE: ${err}`);
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: saveCrawledPagesBatch failed: ${err}`);
         }
       }
     }
@@ -416,8 +524,8 @@ export class CrawlRepository {
         });
         return;
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(`PERSISTENCE_UNAVAILABLE: ${err}`);
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: saveIssuesBatch failed: ${err}`);
         }
       }
     }
@@ -447,8 +555,8 @@ export class CrawlRepository {
         });
         return;
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(`PERSISTENCE_UNAVAILABLE: ${err}`);
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: saveLinkEdgesBatch failed: ${err}`);
         }
       }
     }
@@ -478,8 +586,8 @@ export class CrawlRepository {
         });
         return;
       } catch (err) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(`PERSISTENCE_UNAVAILABLE: ${err}`);
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: saveSeoEventsBatch failed: ${err}`);
         }
       }
     }
@@ -505,7 +613,27 @@ export class CrawlRepository {
           skip: offset,
           take: limit,
         });
-        return { total, pages: rows as unknown as CrawledPageRecord[] };
+        return {
+          total,
+          pages: rows.map((r) => ({
+            ...r,
+            crawledAt: r.crawledAt.toISOString(),
+            finalUrl: r.finalUrl || undefined,
+            redirectChainJson: r.redirectChainJson || undefined,
+            canonicalUrl: r.canonicalUrl || undefined,
+            normalizedCanonicalUrl: r.normalizedCanonicalUrl || undefined,
+            title: r.title || undefined,
+            metaDescription: r.metaDescription || undefined,
+            metaRobots: r.metaRobots || undefined,
+            xRobotsTag: r.xRobotsTag || undefined,
+            contentHash: r.contentHash || undefined,
+            simHash: r.simHash || undefined,
+            duplicateClusterId: r.duplicateClusterId || undefined,
+            openGraphJson: r.openGraphJson || undefined,
+            twitterCardJson: r.twitterCardJson || undefined,
+            hreflangsJson: r.hreflangsJson || undefined,
+          })),
+        };
       } catch {
         // Fallback
       }
@@ -534,7 +662,14 @@ export class CrawlRepository {
           skip: offset,
           take: limit,
         });
-        return { total, issues: rows as unknown as CrawlIssueRecord[] };
+        return {
+          total,
+          issues: rows.map((r) => ({
+            ...r,
+            crawledPageId: r.crawledPageId || undefined,
+            createdAt: r.createdAt.toISOString(),
+          })),
+        };
       } catch {
         // Fallback
       }
@@ -549,27 +684,46 @@ export class CrawlRepository {
 
   public static async getSeoEvents(
     websiteId: string,
-    options: { offset?: number; limit?: number } = {}
+    options: { offset?: number; limit?: number; crawlRunId?: string; severity?: string; eventType?: string } = {}
   ): Promise<{ total: number; events: SeoEventRecord[] }> {
-    const { offset = 0, limit = 100 } = options;
+    const { offset = 0, limit = 100, crawlRunId, severity, eventType } = options;
     const prisma = getPrismaClient();
 
     if (prisma) {
       try {
-        const total = await prisma.seoEvent.count({ where: { websiteId } });
+        const where: any = { websiteId };
+        if (crawlRunId) where.crawlRunId = crawlRunId;
+        if (severity) where.severity = severity;
+        if (eventType) where.eventType = eventType;
+
+        const total = await prisma.seoEvent.count({ where });
         const rows = await prisma.seoEvent.findMany({
-          where: { websiteId },
+          where,
           orderBy: { detectedAt: 'desc' },
           skip: offset,
           take: limit,
         });
-        return { total, events: rows as unknown as SeoEventRecord[] };
+        return {
+          total,
+          events: rows.map((r) => ({
+            ...r,
+            crawlRunId: r.crawlRunId || undefined,
+            beforeValue: r.beforeValue || undefined,
+            afterValue: r.afterValue || undefined,
+            deltaNotes: r.deltaNotes || undefined,
+            detectedAt: r.detectedAt.toISOString(),
+          })),
+        };
       } catch {
         // Fallback
       }
     }
 
-    const all = devSeoEvents.get(websiteId) || [];
+    let all = devSeoEvents.get(websiteId) || [];
+    if (crawlRunId) all = all.filter((e) => e.crawlRunId === crawlRunId);
+    if (severity) all = all.filter((e) => e.severity === severity);
+    if (eventType) all = all.filter((e) => e.eventType === eventType);
+
     return {
       total: all.length,
       events: all.slice(offset, offset + limit),
@@ -591,7 +745,18 @@ export class CrawlRepository {
           skip: offset,
           take: limit,
         });
-        return { total, links: rows as unknown as InternalLinkEdgeRecord[] };
+        return {
+          total,
+          links: rows.map((r) => ({
+            ...r,
+            sourceUrlIdentityId: r.sourceUrlIdentityId || undefined,
+            targetUrlIdentityId: r.targetUrlIdentityId || undefined,
+            anchorText: r.anchorText || undefined,
+            rel: r.rel || undefined,
+            targetStatusCode: r.targetStatusCode || undefined,
+            createdAt: r.createdAt.toISOString(),
+          })),
+        };
       } catch {
         // Fallback
       }

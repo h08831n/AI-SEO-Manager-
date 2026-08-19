@@ -1,16 +1,20 @@
 import { startBackgroundWorker } from './services/worker/backgroundWorker';
-import { CrawlerQueueRegistry } from './queues/crawlerQueue';
+import { CrawlerQueueConsumer } from './queues/crawlerQueueConsumer';
+import { OutboxDispatcher } from './services/outbox/outboxDispatcher';
 import { recordWorkerHeartbeat } from './routes/observabilityRoutes';
 
-console.log('[Worker Process] Initializing Autonomous SEO Worker Runtime & Crawler Queue...');
+console.log('[Worker Process] Initializing Autonomous SEO Worker Runtime, Consumer & Outbox Dispatcher...');
 
-// 1. Initialize BullMQ Crawler Queues & Workers
-CrawlerQueueRegistry.initialize();
+// 1. Initialize BullMQ Crawler Consumer Worker
+CrawlerQueueConsumer.initialize();
 
-// 2. Start Background Task Worker
+// 2. Start Transactional Outbox Polling
+OutboxDispatcher.startPolling(2000);
+
+// 3. Start Background Task Worker
 const workerRuntime = startBackgroundWorker();
 
-// 3. Periodic Worker Heartbeat emitter
+// 4. Periodic Worker Heartbeat emitter (local + shared)
 const heartbeatTimer = setInterval(() => {
   recordWorkerHeartbeat();
 }, 10000);
@@ -19,8 +23,9 @@ const heartbeatTimer = setInterval(() => {
 const shutdown = async (signal: string) => {
   console.log(`[Worker Process] Received ${signal}. Shutting down worker gracefully...`);
   clearInterval(heartbeatTimer);
+  OutboxDispatcher.stopPolling();
   try {
-    await CrawlerQueueRegistry.shutdown();
+    await CrawlerQueueConsumer.shutdown();
     await workerRuntime.stop();
     console.log('[Worker Process] Worker shutdown completed.');
     process.exit(0);

@@ -22,8 +22,20 @@ export function createApp() {
     })
   );
 
-  // CORS
-  app.use(cors());
+  // Configurable CORS: Allowed origins via CORS_ALLOWED_ORIGINS, defaulting to * in dev
+  const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS
+    ? process.env.CORS_ALLOWED_ORIGINS.split(',').map((s) => s.trim())
+    : '*';
+  app.use(
+    cors(
+      allowedOrigins === '*'
+        ? undefined
+        : {
+            origin: allowedOrigins,
+            credentials: true,
+          }
+    )
+  );
 
   // Body Parsing with Bounds
   app.use(express.json({ limit: '2mb' }));

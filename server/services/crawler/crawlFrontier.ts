@@ -13,6 +13,7 @@ export interface FrontierItem {
   parentUrl?: string;
   attemptCount: number;
   lastError?: string;
+  nextAttemptAt?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -99,10 +100,15 @@ export class CrawlFrontier {
 
     if (prisma) {
       try {
+        const now = new Date();
         const next = await prisma.crawlFrontierEntry.findFirst({
           where: {
             crawlRunId: this.crawlRunId,
             status: { in: ['DISCOVERED', 'QUEUED'] },
+            OR: [
+              { nextAttemptAt: null },
+              { nextAttemptAt: { lte: now } },
+            ],
           },
           orderBy: [
             { priority: 'desc' },
@@ -128,6 +134,7 @@ export class CrawlFrontier {
             parentUrl: updated.parentUrl || undefined,
             attemptCount: updated.attemptCount,
             lastError: updated.lastError || undefined,
+            nextAttemptAt: updated.nextAttemptAt ? updated.nextAttemptAt.toISOString() : undefined,
             createdAt: updated.createdAt.toISOString(),
           };
         }
@@ -139,12 +146,59 @@ export class CrawlFrontier {
       }
     }
 
-    const item = this.memoryQueue.shift();
-    if (item) {
+    const nowIso = new Date().toISOString();
+    const readyIdx = this.memoryQueue.findIndex(
+      (item) => !item.nextAttemptAt || item.nextAttemptAt <= nowIso
+    );
+
+    if (readyIdx >= 0) {
+      const item = this.memoryQueue.splice(readyIdx, 1)[0];
       item.status = 'FETCHING';
       this.memoryVisitedUrls.add(item.normalizedUrl);
+      return item;
     }
-    return item;
+
+    return undefined;
+  }
+
+  public async scheduleRetry(
+    normalizedUrl: string,
+    error: string,
+    delayMs: number,
+    attemptCount: number
+  ): Promise<void> {
+    const nextAttemptAt = new Date(Date.now() + delayMs);
+    const prisma = getPrismaClient();
+
+    if (prisma) {
+      try {
+        await prisma.crawlFrontierEntry.updateMany({
+          where: { crawlRunId: this.crawlRunId, normalizedUrl },
+          data: {
+            status: 'DISCOVERED',
+            lastError: error,
+            attemptCount,
+            nextAttemptAt,
+          },
+        });
+        return;
+      } catch (err) {
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: Frontier scheduleRetry failed: ${err}`);
+        }
+      }
+    }
+
+    const item = this.memoryItemsByNormalizedUrl.get(normalizedUrl);
+    if (item) {
+      item.status = 'QUEUED';
+      item.attemptCount = attemptCount;
+      item.lastError = error;
+      item.nextAttemptAt = nextAttemptAt.toISOString();
+      this.memoryVisitedUrls.delete(normalizedUrl);
+      this.memoryQueue.push(item);
+      this.memoryQueue.sort((a, b) => (b.priority !== a.priority ? b.priority - a.priority : a.depth - b.depth));
+    }
   }
 
   public async markCompleted(normalizedUrl: string): Promise<void> {
@@ -278,6 +332,7 @@ export class CrawlFrontier {
           parentUrl: r.parentUrl || undefined,
           attemptCount: r.attemptCount,
           lastError: r.lastError || undefined,
+          nextAttemptAt: r.nextAttemptAt ? r.nextAttemptAt.toISOString() : undefined,
           createdAt: r.createdAt.toISOString(),
         }));
       } catch {

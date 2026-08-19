@@ -290,6 +290,7 @@ model CrawlFrontierEntry {
   parentUrl       String?
   attemptCount    Int            @default(0)
   lastError       String?
+  nextAttemptAt   DateTime?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
 
@@ -297,6 +298,7 @@ model CrawlFrontierEntry {
 
   @@unique([crawlRunId, normalizedUrl])
   @@index([crawlRunId, status, priority])
+  @@index([crawlRunId, nextAttemptAt])
   @@map("crawl_frontier_entries")
 }
 
@@ -361,24 +363,28 @@ model CrawledPage {
 }
 
 model InternalLinkEdge {
-  id               String   @id @default(uuid())
-  crawlRunId       String
-  sourceUrl        String
-  targetUrl        String
-  normalizedTarget String
-  anchorText       String?
-  isInternal       Boolean  @default(true)
-  rel              String?
-  isNofollow       Boolean  @default(false)
-  targetStatusCode Int?
-  isBroken         Boolean  @default(false)
-  createdAt        DateTime @default(now())
+  id                  String   @id @default(uuid())
+  crawlRunId          String
+  sourceUrlIdentityId String?
+  targetUrlIdentityId String?
+  sourceUrl           String
+  targetUrl           String
+  normalizedTarget    String
+  anchorText          String?
+  isInternal          Boolean  @default(true)
+  rel                 String?
+  isNofollow          Boolean  @default(false)
+  targetStatusCode    Int?
+  isBroken            Boolean  @default(false)
+  createdAt           DateTime @default(now())
 
-  crawlRun         CrawlRun @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
+  crawlRun            CrawlRun @relation(fields: [crawlRunId], references: [id], onDelete: Cascade)
 
   @@index([crawlRunId, sourceUrl])
   @@index([crawlRunId, normalizedTarget])
   @@index([crawlRunId, isBroken])
+  @@index([crawlRunId, sourceUrlIdentityId])
+  @@index([crawlRunId, targetUrlIdentityId])
   @@map("internal_link_edges")
 }
 

@@ -1,10 +1,7 @@
 import * as cheerio from 'cheerio';
 import zlib from 'zlib';
-import { promisify } from 'util';
 import { SafeUrlPolicy } from '../../security/safeUrlPolicy';
 import { UrlNormalizer } from './urlNormalizer';
-
-const gunzipAsync = promisify(zlib.gunzip);
 
 export interface DiscoveredSitemapUrl {
   loc: string;
@@ -21,15 +18,42 @@ export interface SitemapDiscoveryResult {
   errors: string[];
 }
 
+function decompressGzipBounded(buffer: Buffer, maxDecompressedBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const gunzip = zlib.createGunzip();
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+
+    gunzip.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > maxDecompressedBytes) {
+        gunzip.destroy(new Error(`Decompressed sitemap size exceeded safety limit of ${maxDecompressedBytes} bytes`));
+      } else {
+        chunks.push(chunk);
+      }
+    });
+
+    gunzip.on('end', () => {
+      resolve(Buffer.concat(chunks));
+    });
+
+    gunzip.on('error', (err) => {
+      reject(err);
+    });
+
+    gunzip.end(buffer);
+  });
+}
+
 export class SitemapService {
-  private static MAX_SITEMAP_BYTES = 10 * 1024 * 1024; // 10MB max raw bytes
-  private static MAX_DECOMPRESSED_BYTES = 50 * 1024 * 1024; // 50MB decompressed max
-  private static MAX_GLOBAL_SITEMAP_URLS = 50000;
-  private static MAX_SITEMAP_FILES = 100;
-  private static MAX_SITEMAP_INDEX_DEPTH = 3;
+  public static readonly MAX_SITEMAP_BYTES = 10 * 1024 * 1024; // 10MB max raw bytes
+  public static readonly MAX_DECOMPRESSED_BYTES = 50 * 1024 * 1024; // 50MB decompressed max
+  public static readonly MAX_GLOBAL_SITEMAP_URLS = 50000;
+  public static readonly MAX_SITEMAP_FILES = 100;
+  public static readonly MAX_SITEMAP_INDEX_DEPTH = 3;
 
   /**
-   * Fetches and parses a sitemap XML or sitemap index with global safety caps and gzip support
+   * Fetches and parses a sitemap XML or sitemap index with global safety caps and streaming gzip support
    */
   public static async discoverUrlsFromSitemap(
     sitemapUrl: string,
@@ -70,7 +94,7 @@ export class SitemapService {
 
       let xmlContent = fetchResult.body;
 
-      // Handle gzip compressed sitemaps (.xml.gz or gzip content type)
+      // Handle gzip compressed sitemaps (.xml.gz or gzip content type or magic bytes)
       if (
         sitemapUrl.endsWith('.gz') ||
         fetchResult.contentType.includes('gzip') ||
@@ -78,10 +102,7 @@ export class SitemapService {
         fetchResult.rawBuffer.slice(0, 2).equals(Buffer.from([0x1f, 0x8b]))
       ) {
         try {
-          const decompressed = await gunzipAsync(fetchResult.rawBuffer);
-          if (decompressed.length > this.MAX_DECOMPRESSED_BYTES) {
-            throw new Error(`Decompressed sitemap size exceeded safety limit of ${this.MAX_DECOMPRESSED_BYTES} bytes`);
-          }
+          const decompressed = await decompressGzipBounded(fetchResult.rawBuffer, this.MAX_DECOMPRESSED_BYTES);
           xmlContent = decompressed.toString('utf-8');
         } catch (decompErr: any) {
           if (!xmlContent.includes('<?xml') && !xmlContent.includes('<urlset') && !xmlContent.includes('<sitemapindex')) {

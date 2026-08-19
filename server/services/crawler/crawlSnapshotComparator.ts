@@ -7,6 +7,8 @@ export interface CrawledPageSnapshot {
   metaDescription?: string | null;
   h1Tags: string[];
   canonicalUrl?: string | null;
+  metaRobots?: string | null;
+  xRobotsTag?: string | null;
   isIndexable: boolean;
   contentHash?: string | null;
   inlinksCount: number;
@@ -15,7 +17,7 @@ export interface CrawledPageSnapshot {
 export interface DetectedSeoEvent {
   websiteId: string;
   crawlRunId: string;
-  eventType: string; // NEW_URL, REMOVED_URL, STATUS_CHANGED, TITLE_CHANGED, CANONICAL_CHANGED, ROBOTS_CHANGED, INDEXABILITY_CHANGED, NEW_404, RECOVERED_404, CONTENT_CHANGED
+  eventType: string; // NEW_URL, NOT_DISCOVERED_THIS_RUN, STATUS_CHANGED, TITLE_CHANGED, DESCRIPTION_CHANGED, H1_CHANGED, CANONICAL_CHANGED, META_ROBOTS_CHANGED, X_ROBOTS_CHANGED, INDEXABILITY_CHANGED, NEW_404, RECOVERED_404, CONTENT_CHANGED
   entityType: string;
   entityUrl: string;
   beforeValue?: string;
@@ -33,9 +35,20 @@ export class CrawlSnapshotComparator {
     websiteId: string,
     currentCrawlRunId: string,
     currentPages: CrawledPageSnapshot[],
-    previousPages: CrawledPageSnapshot[]
+    previousPages: CrawledPageSnapshot[],
+    options: {
+      isComparable?: boolean;
+      currentCrawlStatus?: string;
+      previousCrawlStatus?: string;
+    } = {}
   ): DetectedSeoEvent[] {
     const events: DetectedSeoEvent[] = [];
+    const isComparable = options.isComparable ?? true;
+
+    if (!isComparable) {
+      return events;
+    }
+
     const prevMap = new Map<string, CrawledPageSnapshot>();
     const currMap = new Map<string, CrawledPageSnapshot>();
 
@@ -101,6 +114,40 @@ export class CrawlSnapshotComparator {
         });
       }
 
+      // Meta Description Change
+      if (curr.metaDescription !== prev.metaDescription) {
+        events.push({
+          websiteId,
+          crawlRunId: currentCrawlRunId,
+          eventType: 'DESCRIPTION_CHANGED',
+          entityType: 'URL',
+          entityUrl: curr.url,
+          beforeValue: JSON.stringify({ metaDescription: prev.metaDescription }),
+          afterValue: JSON.stringify({ metaDescription: curr.metaDescription }),
+          deltaNotes: `Meta description updated`,
+          severity: 'LOW',
+          source: 'CRAWLER',
+        });
+      }
+
+      // H1 Change
+      const prevH1 = (prev.h1Tags || []).join(' | ');
+      const currH1 = (curr.h1Tags || []).join(' | ');
+      if (prevH1 !== currH1) {
+        events.push({
+          websiteId,
+          crawlRunId: currentCrawlRunId,
+          eventType: 'H1_CHANGED',
+          entityType: 'URL',
+          entityUrl: curr.url,
+          beforeValue: JSON.stringify({ h1Tags: prev.h1Tags }),
+          afterValue: JSON.stringify({ h1Tags: curr.h1Tags }),
+          deltaNotes: `H1 headings modified`,
+          severity: 'MEDIUM',
+          source: 'CRAWLER',
+        });
+      }
+
       // Canonical Change
       if (curr.canonicalUrl !== prev.canonicalUrl) {
         events.push({
@@ -112,6 +159,38 @@ export class CrawlSnapshotComparator {
           beforeValue: JSON.stringify({ canonicalUrl: prev.canonicalUrl }),
           afterValue: JSON.stringify({ canonicalUrl: curr.canonicalUrl }),
           deltaNotes: `Canonical URL directive changed from "${prev.canonicalUrl || 'none'}" to "${curr.canonicalUrl || 'none'}"`,
+          severity: 'HIGH',
+          source: 'CRAWLER',
+        });
+      }
+
+      // Meta Robots Change
+      if (curr.metaRobots !== prev.metaRobots) {
+        events.push({
+          websiteId,
+          crawlRunId: currentCrawlRunId,
+          eventType: 'META_ROBOTS_CHANGED',
+          entityType: 'URL',
+          entityUrl: curr.url,
+          beforeValue: JSON.stringify({ metaRobots: prev.metaRobots }),
+          afterValue: JSON.stringify({ metaRobots: curr.metaRobots }),
+          deltaNotes: `Meta robots directive changed from "${prev.metaRobots || 'none'}" to "${curr.metaRobots || 'none'}"`,
+          severity: 'HIGH',
+          source: 'CRAWLER',
+        });
+      }
+
+      // X-Robots-Tag Change
+      if (curr.xRobotsTag !== prev.xRobotsTag) {
+        events.push({
+          websiteId,
+          crawlRunId: currentCrawlRunId,
+          eventType: 'X_ROBOTS_CHANGED',
+          entityType: 'URL',
+          entityUrl: curr.url,
+          beforeValue: JSON.stringify({ xRobotsTag: prev.xRobotsTag }),
+          afterValue: JSON.stringify({ xRobotsTag: curr.xRobotsTag }),
+          deltaNotes: `X-Robots-Tag header changed from "${prev.xRobotsTag || 'none'}" to "${curr.xRobotsTag || 'none'}"`,
           severity: 'HIGH',
           source: 'CRAWLER',
         });
@@ -150,13 +229,13 @@ export class CrawlSnapshotComparator {
       }
     }
 
-    // 2. Evaluate missing URLs from current crawl (NOT_DISCOVERED_THIS_RUN)
+    // 2. Evaluate missing URLs from current crawl (NOT_DISCOVERED_THIS_RUN - never false removed confirmation)
     for (const prev of previousPages) {
       if (!currMap.has(prev.normalizedUrl)) {
         events.push({
           websiteId,
           crawlRunId: currentCrawlRunId,
-          eventType: 'REMOVED_URL',
+          eventType: 'NOT_DISCOVERED_THIS_RUN',
           entityType: 'URL',
           entityUrl: prev.url,
           beforeValue: JSON.stringify({ statusCode: prev.statusCode, title: prev.title }),

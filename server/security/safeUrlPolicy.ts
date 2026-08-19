@@ -1,8 +1,7 @@
 import dns from 'dns';
 import { promisify } from 'util';
 import net from 'net';
-import http from 'http';
-import https from 'https';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 const lookupAsync = promisify(dns.lookup);
 
@@ -237,35 +236,36 @@ export class SafeUrlPolicy {
 
       const pinnedIp = destCheck.resolvedIps[0];
 
-      // Custom Agent with DNS pinning to prevent TOCTOU DNS rebinding
-      const agentOptions = {
-        lookup: (_hostname: string, _opts: any, cb: any) => {
-          if (SafeDestinationPolicy.isIpBlocked(pinnedIp)) {
-            cb(new Error(`SSRF TOCTOU Guard: Target IP ${pinnedIp} is blocked`));
-          } else {
-            cb(null, pinnedIp, net.isIPv6(pinnedIp) ? 6 : 4);
-          }
+      // Undici Agent with DNS pinning to pinned IP, enforcing TLS verification & SNI
+      const dispatcher = new Agent({
+        connect: {
+          lookup: (_hostname: string, _opts: any, cb: any) => {
+            if (SafeDestinationPolicy.isIpBlocked(pinnedIp)) {
+              cb(new Error(`SSRF TOCTOU Guard: Target IP ${pinnedIp} is blocked`), null as any, 4);
+            } else {
+              cb(null, pinnedIp, net.isIPv6(pinnedIp) ? 6 : 4);
+            }
+          },
+          rejectUnauthorized: true,
+          servername: parsed.hostname,
         },
-      };
-
-      const customAgent = parsed.protocol === 'https:' ? new https.Agent(agentOptions) : new http.Agent(agentOptions);
+      });
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        // @ts-ignore
-        const response = await fetch(currentUrl, {
+        const response = await undiciFetch(currentUrl, {
           method: 'GET',
           headers: {
             'User-Agent': userAgent,
             Accept: allowedContentTypes.join(', '),
             'Accept-Language': 'en-US,en;q=0.5',
+            Host: parsed.host,
           },
           signal: controller.signal,
           redirect: 'manual',
-          // @ts-ignore
-          agent: customAgent,
+          dispatcher,
         });
 
         clearTimeout(timeoutId);
@@ -299,12 +299,33 @@ export class SafeUrlPolicy {
           continue;
         }
 
-        // Read raw response Buffer (binary-safe)
-        const arrayBuf = await response.arrayBuffer();
-        const rawBuffer = Buffer.from(arrayBuf);
-        ResponseContentPolicy.validateByteSize(rawBuffer.length, maxResponseBytes);
-
+        // Validate Content-Type
         const contentType = response.headers.get('content-type') || '';
+        if (!ResponseContentPolicy.validateContentType(contentType, allowedContentTypes)) {
+          throw new Error(`CONTENT_TYPE_NOT_ALLOWED: Response content-type "${contentType}" is not in allowed list [${allowedContentTypes.join(', ')}]`);
+        }
+
+        // Stream and bound reading of response body
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+
+        if (response.body) {
+          const reader = (response.body as any).getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              totalBytes += value.length;
+              if (totalBytes > maxResponseBytes) {
+                controller.abort();
+                throw new Error(`Response payload exceeded size limit of ${maxResponseBytes} bytes`);
+              }
+              chunks.push(value);
+            }
+          }
+        }
+
+        const rawBuffer = Buffer.concat(chunks);
         const bodyText = rawBuffer.toString('utf-8');
 
         const headersMap: Record<string, string> = {};

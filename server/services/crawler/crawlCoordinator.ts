@@ -120,7 +120,7 @@ export class CrawlCoordinator {
     };
 
     const frontier = new CrawlFrontier(crawlRunId);
-    let robotsParsed: ParsedRobotsTxt = { rules: [], sitemaps: [], rawContent: '' };
+    let robotsParsed: ParsedRobotsTxt = { ruleGroups: [], sitemaps: [], rawContent: '' };
 
     // 1. Fetch & Parse robots.txt
     if (respectRobots) {
@@ -481,7 +481,7 @@ export class CrawlCoordinator {
 
       // 16. Historical Snapshot Comparison & SEO Event Generation
       const previousRuns = await CrawlRepository.listCrawlRuns(websiteId);
-      const lastCompleted = previousRuns.find((r) => r.id !== crawlRunId && (r.status === 'COMPLETED' || r.status === 'COMPLETED_WITH_ERRORS'));
+      const lastCompleted = previousRuns.runs.find((r) => r.id !== crawlRunId && (r.status === 'COMPLETED' || r.status === 'COMPLETED_WITH_ERRORS'));
 
       if (lastCompleted) {
         const previousPagesResult = await CrawlRepository.getCrawledPages(lastCompleted.id, { limit: 10000 });
