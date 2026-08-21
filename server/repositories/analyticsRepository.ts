@@ -1,5 +1,6 @@
 import { prisma } from '../db/prisma';
 import { SafeUrlPolicy } from '../security/safeUrlPolicy';
+import { UrlNormalizer } from '../services/crawler/urlNormalizer';
 
 export interface GscFactUpsertInput {
   websiteId: string;
@@ -63,26 +64,36 @@ export class AnalyticsRepository {
 
     const websiteId = facts[0].websiteId;
 
-    // Collect all page URLs to resolve UrlIdentity mappings in bulk
-    const rawUrls = facts
-      .map((f) => f.pageUrl)
-      .filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
-    
-    const uniqueUrls = Array.from(new Set(rawUrls));
-    const urlMap = new Map<string, string>(); // rawUrl -> urlIdentityId
+    // Normalize all page URLs to resolve UrlIdentity mappings using UrlNormalizer
+    const normalizedToRaw = new Map<string, string>();
+    for (const f of facts) {
+      if (f.pageUrl && f.pageUrl.trim().length > 0) {
+        try {
+          const norm = UrlNormalizer.normalize(f.pageUrl);
+          normalizedToRaw.set(norm, f.pageUrl);
+        } catch {
+          normalizedToRaw.set(f.pageUrl, f.pageUrl);
+        }
+      }
+    }
 
-    if (uniqueUrls.length > 0) {
+    const uniqueNormalizedUrls = Array.from(normalizedToRaw.keys());
+    const urlMap = new Map<string, string>(); // rawUrl or normUrl -> urlIdentityId
+
+    if (uniqueNormalizedUrls.length > 0) {
       // Find matching UrlIdentities
       const identities = await prisma.urlIdentity.findMany({
         where: {
           websiteId,
-          normalizedUrl: { in: uniqueUrls },
+          normalizedUrl: { in: uniqueNormalizedUrls },
         },
         select: { id: true, normalizedUrl: true },
       });
 
       for (const idn of identities) {
         urlMap.set(idn.normalizedUrl, idn.id);
+        const raw = normalizedToRaw.get(idn.normalizedUrl);
+        if (raw) urlMap.set(raw, idn.id);
       }
     }
 
@@ -94,7 +105,19 @@ export class AnalyticsRepository {
 
       await prisma.$transaction(
         chunk.map((fact) => {
-          const matchedIdentityId = fact.pageUrl ? urlMap.get(fact.pageUrl) || null : null;
+          let matchedIdentityId: string | null = null;
+          if (fact.pageUrl) {
+            matchedIdentityId = urlMap.get(fact.pageUrl) || null;
+            if (!matchedIdentityId) {
+              try {
+                const norm = UrlNormalizer.normalize(fact.pageUrl);
+                matchedIdentityId = urlMap.get(norm) || null;
+              } catch {
+                // Ignore parse errors
+              }
+            }
+          }
+
           const urlMatchStatus = fact.pageUrl
             ? matchedIdentityId
               ? 'MATCHED_URL_IDENTITY'
@@ -335,6 +358,8 @@ export class AnalyticsRepository {
 
   /**
    * Aggregates Top Queries with mathematically sound weighted CTR and weighted position.
+   * Strictly enforces grain isolation (QUERY_DAILY preferred, fallback to PAGE_QUERY_DAILY only if 0 rows)
+   * to guarantee no double-counting across multi-grain facts.
    */
   public static async getTopQueries(
     websiteId: string,
@@ -349,16 +374,32 @@ export class AnalyticsRepository {
       impressions: number;
       ctr: number;
       avgPosition: number;
+      sourceGrain: string;
     }>
   > {
-    const facts = await prisma.gscSearchAnalyticsFact.findMany({
+    // 1. First attempt to query dedicated QUERY_DAILY grain facts
+    let sourceGrain = 'QUERY_DAILY';
+    let facts = await prisma.gscSearchAnalyticsFact.findMany({
       where: {
         websiteId,
-        grain: { in: ['QUERY_DAILY', 'PAGE_QUERY_DAILY'] },
+        grain: 'QUERY_DAILY',
         date: { gte: startDate, lte: endDate },
         query: { not: '' },
       },
     });
+
+    // 2. Fallback to PAGE_QUERY_DAILY only if dedicated QUERY_DAILY is not populated
+    if (facts.length === 0) {
+      sourceGrain = 'PAGE_QUERY_DAILY';
+      facts = await prisma.gscSearchAnalyticsFact.findMany({
+        where: {
+          websiteId,
+          grain: 'PAGE_QUERY_DAILY',
+          date: { gte: startDate, lte: endDate },
+          query: { not: '' },
+        },
+      });
+    }
 
     const queryAgg = new Map<
       string,
@@ -384,6 +425,7 @@ export class AnalyticsRepository {
         impressions: stats.impressions,
         ctr: parseFloat(ctr.toFixed(2)),
         avgPosition: parseFloat(avgPosition.toFixed(1)),
+        sourceGrain,
       };
     });
 
@@ -395,6 +437,8 @@ export class AnalyticsRepository {
 
   /**
    * Aggregates Top Pages with mathematically sound weighted CTR and weighted position.
+   * Strictly enforces grain isolation (PAGE_DAILY preferred, fallback to PAGE_QUERY_DAILY only if 0 rows)
+   * to guarantee no double-counting across multi-grain facts.
    */
   public static async getTopPages(
     websiteId: string,
@@ -410,16 +454,32 @@ export class AnalyticsRepository {
       ctr: number;
       avgPosition: number;
       urlIdentityId?: string | null;
+      sourceGrain: string;
     }>
   > {
-    const facts = await prisma.gscSearchAnalyticsFact.findMany({
+    // 1. First attempt to query dedicated PAGE_DAILY grain facts
+    let sourceGrain = 'PAGE_DAILY';
+    let facts = await prisma.gscSearchAnalyticsFact.findMany({
       where: {
         websiteId,
-        grain: { in: ['PAGE_DAILY', 'PAGE_QUERY_DAILY'] },
+        grain: 'PAGE_DAILY',
         date: { gte: startDate, lte: endDate },
         pageUrl: { not: '' },
       },
     });
+
+    // 2. Fallback to PAGE_QUERY_DAILY only if dedicated PAGE_DAILY is not populated
+    if (facts.length === 0) {
+      sourceGrain = 'PAGE_QUERY_DAILY';
+      facts = await prisma.gscSearchAnalyticsFact.findMany({
+        where: {
+          websiteId,
+          grain: 'PAGE_QUERY_DAILY',
+          date: { gte: startDate, lte: endDate },
+          pageUrl: { not: '' },
+        },
+      });
+    }
 
     const pageAgg = new Map<
       string,
@@ -452,6 +512,7 @@ export class AnalyticsRepository {
         ctr: parseFloat(ctr.toFixed(2)),
         avgPosition: parseFloat(avgPosition.toFixed(1)),
         urlIdentityId: stats.urlIdentityId,
+        sourceGrain,
       };
     });
 
@@ -553,6 +614,7 @@ export class AnalyticsRepository {
     const channelRows = await prisma.ga4ChannelDaily.findMany({
       where: {
         websiteId,
+        defaultChannelGroup: 'Organic Search',
         date: { gte: startDate, lte: endDate },
       },
     });

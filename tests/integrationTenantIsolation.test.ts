@@ -88,7 +88,7 @@ describe('Phase 3: Integration Tenant Isolation & Security Test Suite', () => {
   });
 
   describe('2. Endpoint Tenant Isolation & RBAC Protection', () => {
-    it('blocks Workspace B from viewing or triggering sync on Workspace A websites', async () => {
+    it('blocks Workspace B from all 8 integration operations on Workspace A website', async () => {
       const siteA = await WebsiteRepository.createWebsite({
         workspaceId: 'workspace-a-isolation',
         domain: 'tenant-a-domain.com',
@@ -104,15 +104,49 @@ describe('Phase 3: Integration Tenant Isolation & Security Test Suite', () => {
         'x-is-admin': 'false',
       };
 
-      // 1. Attempt GET properties with foreign workspace
-      const unauthProperties = await makeRequest(server, {
+      // 1. Cannot generate OAuth URL for Workspace A website
+      const unauthAuthUrl = await makeRequest(server, {
+        method: 'GET',
+        path: `/api/integrations/google/auth-url?websiteId=${siteA.id}`,
+        headers: foreignHeaders,
+      });
+      expect(unauthAuthUrl.status).toBe(404);
+
+      // 2. Cannot list GSC properties for Workspace A website
+      const unauthGscProps = await makeRequest(server, {
         method: 'GET',
         path: `/api/integrations/websites/${siteA.id}/gsc/properties`,
         headers: foreignHeaders,
       });
-      expect(unauthProperties.status).toBe(403);
+      expect(unauthGscProps.status).toBe(403);
 
-      // 2. Attempt POST sync with foreign workspace
+      // 3. Cannot bind GSC property for Workspace A website
+      const unauthGscBind = await makeRequest(server, {
+        method: 'POST',
+        path: `/api/integrations/websites/${siteA.id}/gsc/bind`,
+        headers: foreignHeaders,
+        body: { propertyId: 'sc-domain:tenant-a-domain.com' },
+      });
+      expect(unauthGscBind.status).toBe(403);
+
+      // 4. Cannot list GA4 properties for Workspace A website
+      const unauthGa4Props = await makeRequest(server, {
+        method: 'GET',
+        path: `/api/integrations/websites/${siteA.id}/ga4/properties`,
+        headers: foreignHeaders,
+      });
+      expect(unauthGa4Props.status).toBe(403);
+
+      // 5. Cannot bind GA4 property for Workspace A website
+      const unauthGa4Bind = await makeRequest(server, {
+        method: 'POST',
+        path: `/api/integrations/websites/${siteA.id}/ga4/bind`,
+        headers: foreignHeaders,
+        body: { propertyId: 'properties/123456789' },
+      });
+      expect(unauthGa4Bind.status).toBe(403);
+
+      // 6. Cannot trigger sync for Workspace A website
       const unauthSync = await makeRequest(server, {
         method: 'POST',
         path: `/api/integrations/websites/${siteA.id}/sync`,
@@ -121,7 +155,7 @@ describe('Phase 3: Integration Tenant Isolation & Security Test Suite', () => {
       });
       expect(unauthSync.status).toBe(403);
 
-      // 3. Attempt GET analytics performance with foreign workspace
+      // 7. Cannot read analytics of Workspace A website
       const unauthAnalytics = await makeRequest(server, {
         method: 'GET',
         path: `/api/integrations/websites/${siteA.id}/analytics/performance`,
@@ -129,7 +163,7 @@ describe('Phase 3: Integration Tenant Isolation & Security Test Suite', () => {
       });
       expect(unauthAnalytics.status).toBe(403);
 
-      // 4. Attempt POST disconnect with foreign workspace
+      // 8. Cannot disconnect Google integration of Workspace A website
       const unauthDisconnect = await makeRequest(server, {
         method: 'POST',
         path: `/api/integrations/websites/${siteA.id}/google/disconnect`,

@@ -7,6 +7,11 @@ let prismaInstance: PrismaClient | null = null;
 let pgPoolInstance: pg.Pool | null = null;
 
 export function getPrismaClient(): PrismaClient | null {
+  // If in test environment or explicitly set to mock, return null to use in-memory store
+  if (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true' || !!process.env.VITEST || process.env.USE_MEMORY_DB === 'true' || !process.env.DATABASE_URL) {
+    return null;
+  }
+
   if (!prismaInstance && process.env.DATABASE_URL) {
     try {
       const connectionString = process.env.DATABASE_URL;
@@ -44,4 +49,3 @@ export async function closePrismaClient(): Promise<void> {
     pgPoolInstance = null;
   }
 }
-

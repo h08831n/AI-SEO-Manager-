@@ -38,14 +38,14 @@ describe('Phase 3: PeriodComparisonEngine Test Suite', () => {
     vi.spyOn(AnalyticsRepository, 'getTopQueries').mockImplementation(async (websiteId, start) => {
       if (start.getTime() > new Date('2026-08-01').getTime()) {
         return [
-          { query: 'cloud migration', clicks: 1200, impressions: 10000, ctr: 12.0, avgPosition: 3.2 },
-          { query: 'striking kw', clicks: 50, impressions: 5000, ctr: 1.0, avgPosition: 14.5 },
-          { query: 'low ctr hero', clicks: 30, impressions: 8000, ctr: 0.375, avgPosition: 4.1 },
+          { query: 'cloud migration', clicks: 1200, impressions: 10000, ctr: 12.0, avgPosition: 3.2, sourceGrain: 'QUERY_DAILY' },
+          { query: 'striking kw', clicks: 50, impressions: 5000, ctr: 1.0, avgPosition: 14.5, sourceGrain: 'QUERY_DAILY' },
+          { query: 'low ctr hero', clicks: 30, impressions: 8000, ctr: 0.375, avgPosition: 4.1, sourceGrain: 'QUERY_DAILY' },
         ];
       }
       return [
-        { query: 'cloud migration', clicks: 800, impressions: 8000, ctr: 10.0, avgPosition: 4.5 },
-        { query: 'striking kw', clicks: 40, impressions: 4000, ctr: 1.0, avgPosition: 15.0 },
+        { query: 'cloud migration', clicks: 800, impressions: 8000, ctr: 10.0, avgPosition: 4.5, sourceGrain: 'QUERY_DAILY' },
+        { query: 'striking kw', clicks: 40, impressions: 4000, ctr: 1.0, avgPosition: 15.0, sourceGrain: 'QUERY_DAILY' },
       ];
     });
 

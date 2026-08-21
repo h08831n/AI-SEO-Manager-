@@ -294,38 +294,78 @@ export class SignalDetectionEngine {
       });
     }
 
-    // Save detected signals to seoRecommendation and outboxEvent atomically
+    // Save detected signals following Measured facts -> Signal -> SeoEvent -> Recommendation (deduplicated)
     if (detectedSignals.length > 0) {
-      await prisma.$transaction([
-        ...detectedSignals.map((sig) =>
-          prisma.seoRecommendation.create({
+      const windowKey = `${currentStart.toISOString().split('T')[0]}_${currentEnd.toISOString().split('T')[0]}`;
+
+      for (const sig of detectedSignals) {
+        const entity = sig.details.query || sig.details.url || 'SITE';
+        const deterministicKey = `${sig.websiteId}:${sig.eventType}:${entity}:${windowKey}`;
+
+        // 1. Check for existing recommendation with the same deterministic signature to prevent duplicate creation on every sync
+        const existingRec = await prisma.seoRecommendation.findFirst({
+          where: {
+            websiteId: sig.websiteId,
+            ruleKey: deterministicKey,
+          },
+        });
+
+        if (!existingRec) {
+          await prisma.$transaction([
+            prisma.seoRecommendation.create({
+              data: {
+                websiteId: sig.websiteId,
+                title: sig.details.message || sig.eventType,
+                category: 'ANALYTICS_SIGNAL',
+                actionType: sig.eventType,
+                ruleKey: deterministicKey,
+                evidence: JSON.stringify({
+                  ...sig.details,
+                  source: sig.source,
+                  provenance: sig.provenance,
+                  comparisonWindow: windowKey,
+                  detectedAt: new Date().toISOString(),
+                }),
+                source: sig.source,
+                impactScore: sig.severity === 'CRITICAL' ? 9 : sig.severity === 'HIGH' ? 8 : 6,
+                effortScore: 4,
+                riskScore: 2,
+                businessValue: sig.severity === 'CRITICAL' ? 10 : 7,
+                status: 'RECOMMENDED',
+              },
+            }),
+            prisma.outboxEvent.create({
+              data: {
+                aggregateType: 'SEO_EVENT',
+                aggregateId: deterministicKey,
+                eventType: 'SEO_SIGNAL_DETECTED',
+                payloadJson: JSON.stringify({
+                  ...sig,
+                  deterministicKey,
+                  comparisonWindow: windowKey,
+                  timestamp: new Date().toISOString(),
+                }),
+                status: 'PENDING',
+              },
+            }),
+          ]);
+        } else {
+          // Update existing recommendation evidence in place
+          await prisma.seoRecommendation.update({
+            where: { id: existingRec.id },
             data: {
-              websiteId: sig.websiteId,
-              title: sig.details.message || sig.eventType,
-              category: 'ANALYTICS_SIGNAL',
-              actionType: sig.eventType,
-              evidence: JSON.stringify({ ...sig.details, source: sig.source, provenance: sig.provenance }),
-              source: sig.source,
+              evidence: JSON.stringify({
+                ...sig.details,
+                source: sig.source,
+                provenance: sig.provenance,
+                comparisonWindow: windowKey,
+                refreshedAt: new Date().toISOString(),
+              }),
               impactScore: sig.severity === 'CRITICAL' ? 9 : sig.severity === 'HIGH' ? 8 : 6,
-              effortScore: 4,
-              riskScore: 2,
-              businessValue: sig.severity === 'CRITICAL' ? 10 : 7,
-              status: 'RECOMMENDED',
             },
-          })
-        ),
-        ...detectedSignals.map((sig) =>
-          prisma.outboxEvent.create({
-            data: {
-              aggregateType: 'ANALYTICS_SIGNAL',
-              aggregateId: `${sig.websiteId}:${sig.eventType}:${sig.details.query || sig.details.url || 'GLOBAL'}`,
-              eventType: sig.eventType,
-              payloadJson: JSON.stringify(sig),
-              status: 'PENDING',
-            },
-          })
-        ),
-      ]);
+          });
+        }
+      }
     }
 
     return detectedSignals;
