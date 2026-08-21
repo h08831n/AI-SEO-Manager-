@@ -3,7 +3,7 @@ import { GoogleIntegrationRepository } from '../../repositories/googleIntegratio
 import { AnalyticsRepository } from '../../repositories/analyticsRepository';
 import { GoogleSearchConsoleProvider } from './providers/googleSearchConsoleProvider';
 import { GoogleAnalytics4Provider } from './providers/googleAnalytics4Provider';
-import { SafeUrlPolicy } from '../../security/safeUrlPolicy';
+import { SignalDetectionEngine } from '../analytics/signalDetectionEngine';
 
 export interface SyncOptions {
   websiteId: string;
@@ -45,7 +45,7 @@ export class IntegrationSyncEngine {
       throw new Error(`GSC_NOT_CONFIGURED: No Search Console property bound for website ${websiteId}`);
     }
 
-    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId);
+    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId, 'GSC');
 
     // Calculate dates: Default to past 28 days ending 3 days ago (GSC data delay)
     const end = options.endDate
@@ -182,6 +182,17 @@ export class IntegrationSyncEngine {
         },
       });
 
+      // Automatically evaluate signals after sync
+      try {
+        await SignalDetectionEngine.evaluateSignals({
+          websiteId,
+          currentStart: start,
+          currentEnd: end,
+        });
+      } catch {
+        // Non-blocking for sync completion
+      }
+
       return {
         syncRunId: syncRun.id,
         rowsFetched: totalFetched,
@@ -222,7 +233,7 @@ export class IntegrationSyncEngine {
       throw new Error(`GA4_NOT_CONFIGURED: No GA4 property bound for website ${websiteId}`);
     }
 
-    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId);
+    const { accessToken } = await GoogleIntegrationRepository.getValidAccessToken(websiteId, 'GA4');
 
     const end = options.endDate
       ? new Date(options.endDate)
@@ -253,121 +264,152 @@ export class IntegrationSyncEngine {
     let totalUpserted = 0;
 
     try {
-      // 1. Fetch Landing Page Daily Report
-      const landingPageReport = await this.ga4Provider.runReport(
-        accessToken,
-        ga4Binding.providerPropertyId,
-        {
-          startDate: startDateStr,
-          endDate: endDateStr,
-          dimensions: ['date', 'landingPagePlusQueryString', 'sessionDefaultChannelGroup'],
-          metrics: [
-            'sessions',
-            'engagedSessions',
-            'activeUsers',
-            'newUsers',
-            'keyEvents',
-            'totalRevenue',
-          ],
-          limit: 25000,
-        }
-      );
-
-      totalFetched += landingPageReport.rows.length;
-
       const website = await prisma.website.findUnique({ where: { id: websiteId } });
       const baseDomain = website ? website.domain : '';
 
-      const landingFacts = landingPageReport.rows.map((r) => {
-        const dateVal = r.dimensionValues[0];
-        const rawPath = r.dimensionValues[1] || '/';
-        const channelGroup = r.dimensionValues[2] || 'Organic Search';
+      // 1. Fetch Landing Page Daily Report with full pagination
+      let landingOffset = 0;
+      const batchLimit = 10000;
+      let hasMoreLanding = true;
 
-        // Format date string YYYYMMDD to Date
-        let dateObj = start;
-        if (dateVal && dateVal.length === 8) {
-          const y = parseInt(dateVal.substring(0, 4), 10);
-          const m = parseInt(dateVal.substring(4, 6), 10) - 1;
-          const d = parseInt(dateVal.substring(6, 8), 10);
-          dateObj = new Date(Date.UTC(y, m, d));
+      while (hasMoreLanding) {
+        const landingPageReport = await this.ga4Provider.runReport(
+          accessToken,
+          ga4Binding.providerPropertyId,
+          {
+            startDate: startDateStr,
+            endDate: endDateStr,
+            dimensions: ['date', 'landingPagePlusQueryString', 'sessionDefaultChannelGroup'],
+            metrics: [
+              'sessions',
+              'engagedSessions',
+              'activeUsers',
+              'newUsers',
+              'keyEvents',
+              'totalRevenue',
+            ],
+            limit: batchLimit,
+            offset: landingOffset,
+          }
+        );
+
+        totalFetched += landingPageReport.rows.length;
+
+        const landingFacts = landingPageReport.rows.map((r) => {
+          const dateVal = r.dimensionValues[0];
+          const rawPath = r.dimensionValues[1] || '/';
+          const channelGroup = r.dimensionValues[2] || 'Unassigned';
+
+          // Format date string YYYYMMDD to Date
+          let dateObj = start;
+          if (dateVal && dateVal.length === 8) {
+            const y = parseInt(dateVal.substring(0, 4), 10);
+            const m = parseInt(dateVal.substring(4, 6), 10) - 1;
+            const d = parseInt(dateVal.substring(6, 8), 10);
+            dateObj = new Date(Date.UTC(y, m, d));
+          }
+
+          // Normalize landing page url
+          let normalizedLanding = rawPath;
+          if (rawPath.startsWith('/') && baseDomain) {
+            normalizedLanding = `https://${baseDomain}${rawPath}`;
+          }
+
+          return {
+            websiteId,
+            syncRunId: syncRun.id,
+            date: dateObj,
+            landingPageUrl: normalizedLanding,
+            channelGroup,
+            sessions: Math.round(r.metricValues[0] || 0),
+            engagedSessions: Math.round(r.metricValues[1] || 0),
+            activeUsers: Math.round(r.metricValues[2] || 0),
+            newUsers: Math.round(r.metricValues[3] || 0),
+            keyEvents: Math.round(r.metricValues[4] || 0),
+            totalRevenue: r.metricValues[5] || 0,
+            currency: ga4Binding.currencyCode,
+          };
+        });
+
+        if (landingFacts.length > 0) {
+          const landingUpserted = await AnalyticsRepository.upsertGa4LandingPages(landingFacts);
+          totalUpserted += landingUpserted;
         }
 
-        // Normalize landing page url
-        let normalizedLanding = rawPath;
-        if (rawPath.startsWith('/') && baseDomain) {
-          normalizedLanding = `https://${baseDomain}${rawPath}`;
+        hasMoreLanding = landingPageReport.hasMore && landingPageReport.nextOffset !== undefined;
+        if (hasMoreLanding && landingPageReport.nextOffset) {
+          landingOffset = landingPageReport.nextOffset;
+        } else {
+          hasMoreLanding = false;
         }
-
-        return {
-          websiteId,
-          syncRunId: syncRun.id,
-          date: dateObj,
-          landingPageUrl: normalizedLanding,
-          channelGroup,
-          sessions: Math.round(r.metricValues[0] || 0),
-          engagedSessions: Math.round(r.metricValues[1] || 0),
-          activeUsers: Math.round(r.metricValues[2] || 0),
-          newUsers: Math.round(r.metricValues[3] || 0),
-          keyEvents: Math.round(r.metricValues[4] || 0),
-          totalRevenue: r.metricValues[5] || 0,
-          currency: ga4Binding.currencyCode,
-        };
-      });
-
-      const landingUpserted = await AnalyticsRepository.upsertGa4LandingPages(landingFacts);
-      totalUpserted += landingUpserted;
+      }
 
       // 2. Fetch Channel Breakdown Daily Report
-      const channelReport = await this.ga4Provider.runReport(
-        accessToken,
-        ga4Binding.providerPropertyId,
-        {
-          startDate: startDateStr,
-          endDate: endDateStr,
-          dimensions: ['date', 'sessionDefaultChannelGroup'],
-          metrics: [
-            'sessions',
-            'engagedSessions',
-            'activeUsers',
-            'newUsers',
-            'keyEvents',
-            'totalRevenue',
-          ],
-          limit: 10000,
+      let channelOffset = 0;
+      let hasMoreChannels = true;
+
+      while (hasMoreChannels) {
+        const channelReport = await this.ga4Provider.runReport(
+          accessToken,
+          ga4Binding.providerPropertyId,
+          {
+            startDate: startDateStr,
+            endDate: endDateStr,
+            dimensions: ['date', 'sessionDefaultChannelGroup'],
+            metrics: [
+              'sessions',
+              'engagedSessions',
+              'activeUsers',
+              'newUsers',
+              'keyEvents',
+              'totalRevenue',
+            ],
+            limit: batchLimit,
+            offset: channelOffset,
+          }
+        );
+
+        totalFetched += channelReport.rows.length;
+
+        const channelFacts = channelReport.rows.map((r) => {
+          const dateVal = r.dimensionValues[0];
+          const defaultChannelGroup = r.dimensionValues[1] || 'Unassigned';
+
+          let dateObj = start;
+          if (dateVal && dateVal.length === 8) {
+            const y = parseInt(dateVal.substring(0, 4), 10);
+            const m = parseInt(dateVal.substring(4, 6), 10) - 1;
+            const d = parseInt(dateVal.substring(6, 8), 10);
+            dateObj = new Date(Date.UTC(y, m, d));
+          }
+
+          return {
+            websiteId,
+            syncRunId: syncRun.id,
+            date: dateObj,
+            defaultChannelGroup,
+            sessions: Math.round(r.metricValues[0] || 0),
+            engagedSessions: Math.round(r.metricValues[1] || 0),
+            users: Math.round(r.metricValues[2] || 0),
+            newUsers: Math.round(r.metricValues[3] || 0),
+            keyEvents: Math.round(r.metricValues[4] || 0),
+            totalRevenue: r.metricValues[5] || 0,
+            currency: ga4Binding.currencyCode,
+          };
+        });
+
+        if (channelFacts.length > 0) {
+          const channelUpserted = await AnalyticsRepository.upsertGa4Channels(channelFacts);
+          totalUpserted += channelUpserted;
         }
-      );
 
-      totalFetched += channelReport.rows.length;
-
-      const channelFacts = channelReport.rows.map((r) => {
-        const dateVal = r.dimensionValues[0];
-        const defaultChannelGroup = r.dimensionValues[1] || 'Unassigned';
-
-        let dateObj = start;
-        if (dateVal && dateVal.length === 8) {
-          const y = parseInt(dateVal.substring(0, 4), 10);
-          const m = parseInt(dateVal.substring(4, 6), 10) - 1;
-          const d = parseInt(dateVal.substring(6, 8), 10);
-          dateObj = new Date(Date.UTC(y, m, d));
+        hasMoreChannels = channelReport.hasMore && channelReport.nextOffset !== undefined;
+        if (hasMoreChannels && channelReport.nextOffset) {
+          channelOffset = channelReport.nextOffset;
+        } else {
+          hasMoreChannels = false;
         }
-
-        return {
-          websiteId,
-          syncRunId: syncRun.id,
-          date: dateObj,
-          defaultChannelGroup,
-          sessions: Math.round(r.metricValues[0] || 0),
-          engagedSessions: Math.round(r.metricValues[1] || 0),
-          users: Math.round(r.metricValues[2] || 0),
-          newUsers: Math.round(r.metricValues[3] || 0),
-          keyEvents: Math.round(r.metricValues[4] || 0),
-          totalRevenue: r.metricValues[5] || 0,
-          currency: ga4Binding.currencyCode,
-        };
-      });
-
-      const channelUpserted = await AnalyticsRepository.upsertGa4Channels(channelFacts);
-      totalUpserted += channelUpserted;
+      }
 
       await prisma.integrationSyncRun.update({
         where: { id: syncRun.id },
@@ -378,6 +420,26 @@ export class IntegrationSyncEngine {
           rowsUpserted: totalUpserted,
         },
       });
+
+      await prisma.integration.update({
+        where: { id: ga4Binding.integrationId },
+        data: {
+          lastSyncAt: new Date(),
+          lastSuccessfulApiCallAt: new Date(),
+          lastError: null,
+        },
+      });
+
+      // Trigger signal evaluation
+      try {
+        await SignalDetectionEngine.evaluateSignals({
+          websiteId,
+          currentStart: start,
+          currentEnd: end,
+        });
+      } catch {
+        // Non-blocking
+      }
 
       return {
         syncRunId: syncRun.id,

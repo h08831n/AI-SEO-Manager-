@@ -42,16 +42,15 @@ export class CrawlCoordinator {
   private static activeCrawlControllers: Map<string, AbortController> = new Map();
   private static pausedCrawls: Set<string> = new Set();
 
-  public static cancelCrawl(crawlRunId: string): boolean {
+  public static async cancelCrawl(crawlRunId: string): Promise<boolean> {
     const controller = this.activeCrawlControllers.get(crawlRunId);
     this.pausedCrawls.delete(crawlRunId);
     if (controller) {
       controller.abort();
       this.activeCrawlControllers.delete(crawlRunId);
-      return true;
     }
     // Update repository state if crawl run is recorded
-    CrawlRepository.updateCrawlRun(crawlRunId, { status: 'CANCELLED', completedAt: new Date().toISOString() });
+    await CrawlRepository.updateCrawlRun(crawlRunId, { status: 'CANCELLED', completedAt: new Date().toISOString() });
     return true;
   }
 

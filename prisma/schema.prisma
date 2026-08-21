@@ -530,22 +530,26 @@ model CrawlIssue {
 // ----------------------------------------------------
 
 model SeoEvent {
-  id          String   @id @default(uuid())
-  websiteId   String
-  crawlRunId  String?
-  eventType   String   // NEW_URL, REMOVED_URL, STATUS_CHANGED, TITLE_CHANGED, CANONICAL_CHANGED, ROBOTS_CHANGED, INDEXABILITY_CHANGED, NEW_404, RECOVERED_404, etc.
-  entityType  String   // URL, SITE, ROBOTS, SITEMAP
-  entityUrl   String
-  beforeValue String?  // Serialized previous state
-  afterValue  String?  // Serialized observed state
-  deltaNotes  String?
-  severity    String   @default("INFO") // CRITICAL, HIGH, MEDIUM, LOW, INFO
-  source      String   @default("CRAWLER") // CRAWLER, GSC, MANUAL
-  detectedAt  DateTime @default(now())
+  id               String    @id @default(uuid())
+  websiteId        String
+  crawlRunId       String?
+  eventType        String    // CLICKS_DROP, IMPRESSIONS_DROP, POSITION_DROP, STRIKING_DISTANCE_OPPORTUNITY, ORPHAN_PAGE_RECEIVING_TRAFFIC, NEW_URL, STATUS_CHANGED, etc.
+  entityType       String    // URL, SITE, QUERY, PAGE, CHANNEL, ROBOTS, SITEMAP
+  entityUrl        String    @default("")
+  beforeValue      String?   // Serialized previous state
+  afterValue       String?   // Serialized observed state
+  deltaNotes       String?
+  details          String?   // Serialized event/signal payload JSON
+  severity         String    @default("INFO") // CRITICAL, HIGH, MEDIUM, LOW, INFO
+  source           String    @default("CRAWLER") // CRAWLER, GOOGLE_SEARCH_CONSOLE, GOOGLE_ANALYTICS_4, MANUAL
+  provenance       String    @default("CALCULATED") // MEASURED_PROVIDER, CALCULATED, AI_INFERENCE
+  eventFingerprint String?   // Deterministic identity for deduplication e.g. "websiteId:eventType:entity:window"
+  detectedAt       DateTime  @default(now())
 
-  website     Website   @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  crawlRun    CrawlRun? @relation(fields: [crawlRunId], references: [id], onDelete: SetNull)
+  website          Website   @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  crawlRun         CrawlRun? @relation(fields: [crawlRunId], references: [id], onDelete: SetNull)
 
+  @@unique([websiteId, eventFingerprint])
   @@index([websiteId, detectedAt])
   @@index([websiteId, eventType])
   @@index([crawlRunId])
@@ -577,68 +581,72 @@ model SearchAnalyticsDaily {
 }
 
 model GscSearchAnalyticsFact {
-  id               String              @id @default(uuid())
-  websiteId        String
-  syncRunId        String?
-  urlIdentityId    String?
-  date             DateTime            @db.Date
-  grain            String              @default("SITE_DAILY") // SITE_DAILY, PAGE_DAILY, QUERY_DAILY, PAGE_QUERY_DAILY, COUNTRY_DAILY, DEVICE_DAILY
-  pageUrl          String?
-  query            String?
-  country          String              @default("GLOBAL")
-  device           String              @default("ALL") // ALL, DESKTOP, MOBILE, TABLET
-  searchType       String              @default("WEB") // WEB, IMAGE, VIDEO, NEWS, DISCOVER, GOOGLE_NEWS
-  searchAppearance String?
-  dataState        String              @default("FINALIZED") // FINALIZED, FRESH, HOURLY_PARTIAL
-  clicks           Int                 @default(0)
-  impressions      Int                 @default(0)
-  ctr              Float               @default(0)
-  position         Float               @default(0)
-  provenance       String              @default("MEASURED_PROVIDER") // MEASURED_PROVIDER, CALCULATED
-  urlMatchStatus   String              @default("MATCHED_URL_IDENTITY") // MATCHED_URL_IDENTITY, NORMALIZED_MATCH, UNMATCHED_PROVIDER_URL, EXTERNAL_OR_OUT_OF_SCOPE
-  retrievedAt      DateTime            @default(now())
+  id                 String              @id @default(uuid())
+  websiteId          String
+  syncRunId          String?
+  urlIdentityId      String?
+  providerPropertyId String?             // e.g. sc-domain:example.com or https://example.com/
+  date               DateTime            @db.Date
+  grain              String              @default("SITE_DAILY") // SITE_DAILY, PAGE_DAILY, QUERY_DAILY, PAGE_QUERY_DAILY, COUNTRY_DAILY, DEVICE_DAILY
+  pageUrl            String?
+  query              String?
+  country            String              @default("GLOBAL")
+  device             String              @default("ALL") // ALL, DESKTOP, MOBILE, TABLET
+  searchType         String              @default("WEB") // WEB, IMAGE, VIDEO, NEWS, DISCOVER, GOOGLE_NEWS
+  searchAppearance   String?
+  dataState          String              @default("FINALIZED") // FINALIZED, FRESH, HOURLY_ALL
+  clicks             Int                 @default(0)
+  impressions        Int                 @default(0)
+  ctr                Float               @default(0)
+  position           Float               @default(0)
+  provenance         String              @default("MEASURED_PROVIDER") // MEASURED_PROVIDER, CALCULATED
+  urlMatchStatus     String              @default("MATCHED_URL_IDENTITY") // MATCHED_URL_IDENTITY, NORMALIZED_MATCH, UNMATCHED_PROVIDER_URL, EXTERNAL_OR_OUT_OF_SCOPE
+  retrievedAt        DateTime            @default(now())
 
-  website          Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  syncRun          IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
-  urlIdentity      UrlIdentity?        @relation(fields: [urlIdentityId], references: [id], onDelete: SetNull)
+  website            Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  syncRun            IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
+  urlIdentity        UrlIdentity?        @relation(fields: [urlIdentityId], references: [id], onDelete: SetNull)
 
-  @@unique([websiteId, date, grain, pageUrl, query, country, device, searchType])
+  @@unique([websiteId, date, grain, pageUrl, query, country, device, searchType, searchAppearance, providerPropertyId])
   @@index([websiteId, date])
   @@index([websiteId, grain, date])
   @@index([websiteId, pageUrl, date])
   @@index([websiteId, query, date])
+  @@index([websiteId, providerPropertyId])
   @@index([syncRunId])
   @@index([urlIdentityId])
   @@map("gsc_search_analytics_facts")
 }
 
 model Ga4LandingPageDaily {
-  id               String              @id @default(uuid())
-  websiteId        String
-  syncRunId        String?
-  urlIdentityId    String?
-  date             DateTime            @db.Date
-  landingPageUrl   String
-  channelGroup     String              @default("Organic Search")
-  sessions         Int                 @default(0)
-  engagedSessions  Int                 @default(0)
-  activeUsers      Int                 @default(0)
-  newUsers         Int                 @default(0)
-  keyEvents        Int                 @default(0)
-  totalRevenue     Float               @default(0)
-  currency         String              @default("USD")
-  dataState        String              @default("FINALIZED")
-  provenance       String              @default("MEASURED_PROVIDER")
-  urlMatchStatus   String              @default("MATCHED_URL_IDENTITY")
-  retrievedAt      DateTime            @default(now())
+  id                 String              @id @default(uuid())
+  websiteId          String
+  syncRunId          String?
+  urlIdentityId      String?
+  providerPropertyId String?             // e.g. properties/123456789
+  date               DateTime            @db.Date
+  landingPageUrl     String
+  channelGroup       String              @default("Organic Search")
+  sessions           Int                 @default(0)
+  engagedSessions    Int                 @default(0)
+  activeUsers        Int                 @default(0)
+  newUsers           Int                 @default(0)
+  keyEvents          Int                 @default(0)
+  totalRevenue       Float               @default(0)
+  currency           String              @default("USD")
+  dataState          String              @default("FINALIZED")
+  provenance         String              @default("MEASURED_PROVIDER")
+  urlMatchStatus     String              @default("MATCHED_URL_IDENTITY")
+  retrievedAt        DateTime            @default(now())
 
-  website          Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  syncRun          IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
-  urlIdentity      UrlIdentity?        @relation(fields: [urlIdentityId], references: [id], onDelete: SetNull)
+  website            Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  syncRun            IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
+  urlIdentity        UrlIdentity?        @relation(fields: [urlIdentityId], references: [id], onDelete: SetNull)
 
-  @@unique([websiteId, date, landingPageUrl, channelGroup])
+  @@unique([websiteId, date, landingPageUrl, channelGroup, providerPropertyId])
   @@index([websiteId, date])
   @@index([websiteId, landingPageUrl, date])
+  @@index([websiteId, providerPropertyId])
   @@index([syncRunId])
   @@index([urlIdentityId])
   @@map("ga4_landing_page_daily")
@@ -648,6 +656,7 @@ model Ga4ChannelDaily {
   id                  String              @id @default(uuid())
   websiteId           String
   syncRunId           String?
+  providerPropertyId  String?             // e.g. properties/123456789
   date                DateTime            @db.Date
   defaultChannelGroup String
   sessions            Int                 @default(0)
@@ -664,8 +673,9 @@ model Ga4ChannelDaily {
   website             Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   syncRun             IntegrationSyncRun? @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
 
-  @@unique([websiteId, date, defaultChannelGroup])
+  @@unique([websiteId, date, defaultChannelGroup, providerPropertyId])
   @@index([websiteId, date])
+  @@index([websiteId, providerPropertyId])
   @@index([syncRunId])
   @@map("ga4_channel_daily")
 }

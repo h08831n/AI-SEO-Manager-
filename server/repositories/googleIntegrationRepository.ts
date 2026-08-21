@@ -33,6 +33,7 @@ export class GoogleIntegrationRepository {
   /**
    * Saves or updates the Google OAuth connection for a website.
    * Credentials (refresh token & access token) are encrypted via AES-256-GCM.
+   * Decouples GSC and GA4 capabilities based on granted scopes.
    */
   public static async saveGoogleConnection(params: {
     websiteId: string;
@@ -51,6 +52,14 @@ export class GoogleIntegrationRepository {
 
     const encrypted = SecretVault.encrypt(rawSecretPayload);
     const encryptedCredentials = JSON.stringify(encrypted);
+    const scopesList = params.scopes || [];
+
+    const hasGscScope = scopesList.some(
+      (s) => s.includes('webmasters.readonly') || s.includes('auth/webmasters')
+    );
+    const hasGa4Scope = scopesList.some(
+      (s) => s.includes('analytics.readonly') || s.includes('auth/analytics')
+    );
 
     const integration = await prisma.integration.upsert({
       where: {
@@ -60,7 +69,7 @@ export class GoogleIntegrationRepository {
         },
       },
       update: {
-        status: 'CONNECTED',
+        status: hasGscScope ? 'CONNECTED' : 'NOT_CONFIGURED',
         connectedAccount: params.accountEmail || null,
         accountIdentifier: params.accountEmail || null,
         grantedScopes: params.scopes,
@@ -69,13 +78,15 @@ export class GoogleIntegrationRepository {
         lastRefreshAt: new Date(),
         lastSuccessfulApiCallAt: new Date(),
         lastError: null,
-        message: `Connected as ${params.accountEmail || 'Google Account'}`,
+        message: hasGscScope
+          ? `Connected to Google Search Console as ${params.accountEmail || 'Google Account'}`
+          : `Connected without Google Search Console scope.`,
         encryptedCredentials,
       },
       create: {
         websiteId: params.websiteId,
         provider: 'GSC',
-        status: 'CONNECTED',
+        status: hasGscScope ? 'CONNECTED' : 'NOT_CONFIGURED',
         connectedAccount: params.accountEmail || null,
         accountIdentifier: params.accountEmail || null,
         grantedScopes: params.scopes,
@@ -84,7 +95,51 @@ export class GoogleIntegrationRepository {
         lastRefreshAt: new Date(),
         lastSuccessfulApiCallAt: new Date(),
         lastError: null,
-        message: `Connected as ${params.accountEmail || 'Google Account'}`,
+        message: hasGscScope
+          ? `Connected to Google Search Console as ${params.accountEmail || 'Google Account'}`
+          : `Connected without Google Search Console scope.`,
+        encryptedCredentials,
+      },
+    });
+
+    // Also persist GA4 integration record with independent status
+    await prisma.integration.upsert({
+      where: {
+        websiteId_provider: {
+          websiteId: params.websiteId,
+          provider: 'GA4',
+        },
+      },
+      update: {
+        status: hasGa4Scope ? 'CONNECTED' : 'NOT_CONFIGURED',
+        connectedAccount: params.accountEmail || null,
+        accountIdentifier: params.accountEmail || null,
+        grantedScopes: params.scopes,
+        tokenExpiry: expiresAt,
+        connectedAt: new Date(),
+        lastRefreshAt: new Date(),
+        lastSuccessfulApiCallAt: new Date(),
+        lastError: null,
+        message: hasGa4Scope
+          ? `Connected to Google Analytics 4 as ${params.accountEmail || 'Google Account'}`
+          : `Connected without Google Analytics 4 scope.`,
+        encryptedCredentials,
+      },
+      create: {
+        websiteId: params.websiteId,
+        provider: 'GA4',
+        status: hasGa4Scope ? 'CONNECTED' : 'NOT_CONFIGURED',
+        connectedAccount: params.accountEmail || null,
+        accountIdentifier: params.accountEmail || null,
+        grantedScopes: params.scopes,
+        tokenExpiry: expiresAt,
+        connectedAt: new Date(),
+        lastRefreshAt: new Date(),
+        lastSuccessfulApiCallAt: new Date(),
+        lastError: null,
+        message: hasGa4Scope
+          ? `Connected to Google Analytics 4 as ${params.accountEmail || 'Google Account'}`
+          : `Connected without Google Analytics 4 scope.`,
         encryptedCredentials,
       },
     });
@@ -95,20 +150,39 @@ export class GoogleIntegrationRepository {
   /**
    * Retrieves decrypted Google tokens, automatically refreshing the access token if expired.
    */
-  public static async getValidAccessToken(websiteId: string): Promise<{
+  public static async getValidAccessToken(
+    websiteId: string,
+    provider: 'GSC' | 'GA4' = 'GSC'
+  ): Promise<{
     accessToken: string;
     email?: string;
     scopes: string[];
     integrationId: string;
   }> {
-    const integration = await prisma.integration.findUnique({
+    let integration = await prisma.integration.findUnique({
       where: {
         websiteId_provider: {
           websiteId,
-          provider: 'GSC',
+          provider,
         },
       },
     });
+
+    // Fallback if specific provider record is missing encryptedCredentials
+    if (!integration || !integration.encryptedCredentials || integration.status !== 'CONNECTED') {
+      const fallbackProvider = provider === 'GSC' ? 'GA4' : 'GSC';
+      const fallbackIntegration = await prisma.integration.findUnique({
+        where: {
+          websiteId_provider: {
+            websiteId,
+            provider: fallbackProvider,
+          },
+        },
+      });
+      if (fallbackIntegration && fallbackIntegration.encryptedCredentials && fallbackIntegration.status === 'CONNECTED') {
+        integration = fallbackIntegration;
+      }
+    }
 
     if (!integration || !integration.encryptedCredentials || integration.status !== 'CONNECTED') {
       throw new Error(`GOOGLE_NOT_CONNECTED: Google integration is not active or credentials are missing for website ${websiteId}`);
@@ -148,8 +222,8 @@ export class GoogleIntegrationRepository {
 
         const newEncrypted = SecretVault.encrypt(updatedSecretPayload);
 
-        await prisma.integration.update({
-          where: { id: integration.id },
+        await prisma.integration.updateMany({
+          where: { websiteId, provider: { in: ['GSC', 'GA4'] } },
           data: {
             tokenExpiry: newExpiresAt,
             lastRefreshAt: new Date(),
@@ -224,14 +298,25 @@ export class GoogleIntegrationRepository {
    * Binds a verified GA4 property to a website.
    */
   public static async bindGa4Property(params: Ga4BindingInput): Promise<any> {
-    const integration = await prisma.integration.findUnique({
+    let integration = await prisma.integration.findUnique({
       where: {
         websiteId_provider: {
           websiteId: params.websiteId,
-          provider: 'GSC', // Google OAuth provides both GSC and GA4
+          provider: 'GA4',
         },
       },
     });
+
+    if (!integration) {
+      integration = await prisma.integration.findUnique({
+        where: {
+          websiteId_provider: {
+            websiteId: params.websiteId,
+            provider: 'GSC',
+          },
+        },
+      });
+    }
 
     if (!integration) {
       throw new Error(`Cannot bind GA4 property: Google integration not found for website ${params.websiteId}`);
@@ -269,27 +354,27 @@ export class GoogleIntegrationRepository {
    * Disconnects and revokes Google integration for a website.
    */
   public static async disconnectGoogle(websiteId: string): Promise<void> {
-    const integration = await prisma.integration.findUnique({
+    const integrations = await prisma.integration.findMany({
       where: {
-        websiteId_provider: {
-          websiteId,
-          provider: 'GSC',
-        },
+        websiteId,
+        provider: { in: ['GSC', 'GA4'] },
       },
     });
 
-    if (integration && integration.encryptedCredentials) {
-      try {
-        const encryptedObj = JSON.parse(integration.encryptedCredentials);
-        const decryptedStr = SecretVault.decrypt(encryptedObj);
-        const parsed = JSON.parse(decryptedStr);
-        if (parsed.refreshToken) {
-          await GoogleOAuthClient.revokeToken(parsed.refreshToken);
-        } else if (parsed.accessToken) {
-          await GoogleOAuthClient.revokeToken(parsed.accessToken);
+    for (const integration of integrations) {
+      if (integration.encryptedCredentials) {
+        try {
+          const encryptedObj = JSON.parse(integration.encryptedCredentials);
+          const decryptedStr = SecretVault.decrypt(encryptedObj);
+          const parsed = JSON.parse(decryptedStr);
+          if (parsed.refreshToken) {
+            await GoogleOAuthClient.revokeToken(parsed.refreshToken);
+          } else if (parsed.accessToken) {
+            await GoogleOAuthClient.revokeToken(parsed.accessToken);
+          }
+        } catch {
+          // Continue disconnect cleanup
         }
-      } catch {
-        // Continue disconnect cleanup
       }
     }
 
@@ -297,7 +382,7 @@ export class GoogleIntegrationRepository {
       prisma.searchConsolePropertyBinding.deleteMany({ where: { websiteId } }),
       prisma.ga4PropertyBinding.deleteMany({ where: { websiteId } }),
       prisma.integration.updateMany({
-        where: { websiteId, provider: 'GSC' },
+        where: { websiteId, provider: { in: ['GSC', 'GA4'] } },
         data: {
           status: 'DISCONNECTED',
           encryptedCredentials: null,
@@ -337,7 +422,7 @@ export class GoogleIntegrationRepository {
   }
 
   /**
-   * Consumes and verifies an OAuth state session (single-use).
+   * Consumes and verifies an OAuth state session (single-use, atomic).
    */
   public static async consumeOAuthStateSession(state: string): Promise<{
     workspaceId: string;
@@ -362,11 +447,20 @@ export class GoogleIntegrationRepository {
       throw new Error('OAUTH_STATE_EXPIRED: OAuth state session has expired.');
     }
 
-    // Mark as used atomically
-    await prisma.oAuthStateSession.update({
-      where: { id: session.id },
-      data: { usedAt: new Date() },
+    // Mark as used atomically using updateMany to guarantee single-use consumption under concurrent race conditions
+    const updated = await prisma.oAuthStateSession.updateMany({
+      where: {
+        id: session.id,
+        usedAt: null,
+      },
+      data: {
+        usedAt: new Date(),
+      },
     });
+
+    if (updated.count === 0) {
+      throw new Error('OAUTH_STATE_ALREADY_USED: OAuth state token was already consumed in a concurrent request.');
+    }
 
     return {
       workspaceId: session.workspaceId,
@@ -379,7 +473,7 @@ export class GoogleIntegrationRepository {
 
   public static async markDegraded(websiteId: string, error: string): Promise<void> {
     await prisma.integration.updateMany({
-      where: { websiteId, provider: 'GSC' },
+      where: { websiteId, provider: { in: ['GSC', 'GA4'] } },
       data: {
         status: 'DEGRADED',
         lastError: error,
@@ -390,7 +484,7 @@ export class GoogleIntegrationRepository {
 
   public static async markRevoked(websiteId: string, error: string): Promise<void> {
     await prisma.integration.updateMany({
-      where: { websiteId, provider: 'GSC' },
+      where: { websiteId, provider: { in: ['GSC', 'GA4'] } },
       data: {
         status: 'REVOKED',
         lastError: error,

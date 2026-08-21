@@ -16,6 +16,7 @@ export interface DetectedSignal {
 export class SignalDetectionEngine {
   /**
    * Evaluates performance data for the given website and generates actionable SEO events.
+   * Deduplicates recommendations and publishes outbox events safely.
    */
   public static async evaluateSignals(params: {
     websiteId: string;
@@ -293,7 +294,7 @@ export class SignalDetectionEngine {
       });
     }
 
-    // Save detected signals to seoRecommendation and outboxEvent table
+    // Save detected signals to seoRecommendation and outboxEvent atomically
     if (detectedSignals.length > 0) {
       await prisma.$transaction([
         ...detectedSignals.map((sig) =>
@@ -317,7 +318,7 @@ export class SignalDetectionEngine {
           prisma.outboxEvent.create({
             data: {
               aggregateType: 'ANALYTICS_SIGNAL',
-              aggregateId: `${sig.websiteId}:${sig.eventType}:${Date.now()}`,
+              aggregateId: `${sig.websiteId}:${sig.eventType}:${sig.details.query || sig.details.url || 'GLOBAL'}`,
               eventType: sig.eventType,
               payloadJson: JSON.stringify(sig),
               status: 'PENDING',

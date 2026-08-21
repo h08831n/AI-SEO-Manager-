@@ -4,6 +4,7 @@ import { SafeUrlPolicy } from '../security/safeUrlPolicy';
 export interface GscFactUpsertInput {
   websiteId: string;
   syncRunId?: string;
+  providerPropertyId?: string | null;
   date: Date;
   grain: 'SITE_DAILY' | 'PAGE_DAILY' | 'QUERY_DAILY' | 'PAGE_QUERY_DAILY' | 'COUNTRY_DAILY' | 'DEVICE_DAILY';
   pageUrl?: string | null;
@@ -23,6 +24,7 @@ export interface GscFactUpsertInput {
 export interface Ga4LandingPageUpsertInput {
   websiteId: string;
   syncRunId?: string;
+  providerPropertyId?: string | null;
   date: Date;
   landingPageUrl: string;
   channelGroup?: string;
@@ -39,6 +41,7 @@ export interface Ga4LandingPageUpsertInput {
 export interface Ga4ChannelUpsertInput {
   websiteId: string;
   syncRunId?: string;
+  providerPropertyId?: string | null;
   date: Date;
   defaultChannelGroup: string;
   sessions: number;
@@ -100,7 +103,7 @@ export class AnalyticsRepository {
 
           return prisma.gscSearchAnalyticsFact.upsert({
             where: {
-              websiteId_date_grain_pageUrl_query_country_device_searchType: {
+              websiteId_date_grain_pageUrl_query_country_device_searchType_searchAppearance_providerPropertyId: {
                 websiteId: fact.websiteId,
                 date: fact.date,
                 grain: fact.grain,
@@ -109,6 +112,8 @@ export class AnalyticsRepository {
                 country: fact.country || 'GLOBAL',
                 device: fact.device || 'ALL',
                 searchType: fact.searchType || 'WEB',
+                searchAppearance: fact.searchAppearance || '',
+                providerPropertyId: fact.providerPropertyId || '',
               },
             },
             update: {
@@ -185,11 +190,12 @@ export class AnalyticsRepository {
 
           return prisma.ga4LandingPageDaily.upsert({
             where: {
-              websiteId_date_landingPageUrl_channelGroup: {
+              websiteId_date_landingPageUrl_channelGroup_providerPropertyId: {
                 websiteId: row.websiteId,
                 date: row.date,
                 landingPageUrl: row.landingPageUrl,
                 channelGroup: row.channelGroup || 'Organic Search',
+                providerPropertyId: row.providerPropertyId || '',
               },
             },
             update: {
@@ -249,10 +255,11 @@ export class AnalyticsRepository {
         chunk.map((row) =>
           prisma.ga4ChannelDaily.upsert({
             where: {
-              websiteId_date_defaultChannelGroup: {
+              websiteId_date_defaultChannelGroup_providerPropertyId: {
                 websiteId: row.websiteId,
                 date: row.date,
                 defaultChannelGroup: row.defaultChannelGroup,
+                providerPropertyId: row.providerPropertyId || '',
               },
             },
             update: {

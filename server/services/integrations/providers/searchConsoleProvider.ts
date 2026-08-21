@@ -48,6 +48,7 @@ export interface SearchAnalyticsBatchResult {
   responseAggregationType?: string;
   dataState: 'FINALIZED' | 'FRESH' | 'HOURLY_PARTIAL';
   isComplete: boolean;
+  completenessStatus?: 'AUTHORITATIVE_AGGREGATE' | 'PAGINATION_EXHAUSTED' | 'TOP_ROWS_PROVIDER_LIMITED' | 'UNKNOWN_COMPLETENESS';
   hasMore: boolean;
   nextStartRow?: number;
   retrievedAt: string;

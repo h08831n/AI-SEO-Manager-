@@ -55,6 +55,8 @@ export interface Ga4BatchResult {
   retrievedAt: string;
   provenance: 'MEASURED_PROVIDER';
   samplingMetadata?: any;
+  subjectToThresholding?: boolean;
+  dataLossFromOtherRow?: boolean;
 }
 
 export interface AnalyticsProvider {

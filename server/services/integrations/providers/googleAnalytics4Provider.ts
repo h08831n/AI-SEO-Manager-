@@ -11,62 +11,102 @@ export class GoogleAnalytics4Provider implements AnalyticsProvider {
   private static readonly ADMIN_API_BASE = 'https://analyticsadmin.googleapis.com/v1beta';
   private static readonly DATA_API_BASE = 'https://analyticsdata.googleapis.com/v1beta';
 
+  private async fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
+    let attempt = 0;
+    while (attempt < maxRetries) {
+      attempt++;
+      try {
+        const res = await fetch(url, init);
+        if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
+          if (attempt >= maxRetries) return res;
+          const retryAfterHeader = res.headers.get('retry-after');
+          const delayMs = retryAfterHeader
+            ? parseInt(retryAfterHeader, 10) * 1000 || 2000
+            : Math.min(10000, 1000 * Math.pow(2, attempt) + Math.random() * 500);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+        return res;
+      } catch (networkErr: any) {
+        if (attempt >= maxRetries) throw networkErr;
+        const delayMs = Math.min(10000, 1000 * Math.pow(2, attempt) + Math.random() * 500);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return fetch(url, init);
+  }
+
   /**
    * Lists all Google Analytics 4 accounts and properties accessible to the authenticated user.
+   * Follows pagination tokens to ensure exhaustive discovery.
    */
   public async listAccessibleAccountsAndProperties(
     accessToken: string
   ): Promise<{ accounts: Ga4Account[]; properties: Ga4Property[] }> {
-    const url = `${GoogleAnalytics4Provider.ADMIN_API_BASE}/accountSummaries?pageSize=200`;
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-      },
-    });
-
-    if (!res.ok) {
-      const err = await res.text().catch(() => '');
-      if (res.status === 401 || res.status === 403) {
-        throw new Error(`GA4_AUTH_ERROR (${res.status}): Google Analytics access token invalid or lacks analytics scopes: ${err}`);
-      }
-      if (res.status === 429) {
-        throw new Error(`GA4_RATE_LIMITED (${res.status}): Google Analytics Admin API quota exceeded: ${err}`);
-      }
-      throw new Error(`GA4_API_ERROR (${res.status}): Failed to list GA4 accounts and properties: ${err}`);
-    }
-
-    const data = (await res.json()) as any;
-    const summaries = data.accountSummaries || [];
-
     const accounts: Ga4Account[] = [];
     const properties: Ga4Property[] = [];
+    let pageToken: string | undefined = undefined;
 
-    for (const acc of summaries) {
-      const accountName = acc.account || acc.name || '';
-      const accountId = accountName.replace('accounts/', '');
-      accounts.push({
-        id: accountName,
-        name: accountName,
-        displayName: acc.displayName || `Account ${accountId}`,
+    do {
+      const url = `${GoogleAnalytics4Provider.ADMIN_API_BASE}/accountSummaries?pageSize=200${
+        pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''
+      }`;
+      const res = await this.fetchWithRetry(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+        },
       });
 
-      const propSummaries = acc.propertySummaries || [];
-      for (const prop of propSummaries) {
-        const fullPropName = prop.property || ''; // "properties/123456789"
-        const cleanId = fullPropName.replace('properties/', '');
-        properties.push({
-          id: fullPropName,
-          propertyId: cleanId,
-          displayName: prop.displayName || `Property ${cleanId}`,
-          parentAccount: accountName,
-          timeZone: 'UTC', // Default until metadata query
-          currencyCode: 'USD',
-          propertyType: prop.propertyType || 'PROPERTY_TYPE_ORDINARY',
-        });
+      if (!res.ok) {
+        const err = await res.text().catch(() => '');
+        if (res.status === 401) {
+          throw new Error(`GA4_AUTH_REVOKED (401): Google Analytics access token invalid: ${err}`);
+        }
+        if (res.status === 403) {
+          throw new Error(`GA4_INSUFFICIENT_SCOPE (403): User lacks analytics.readonly scope: ${err}`);
+        }
+        if (res.status === 429) {
+          throw new Error(`GA4_RATE_LIMITED (429): Google Analytics Admin API quota exceeded: ${err}`);
+        }
+        throw new Error(`GA4_API_ERROR (${res.status}): Failed to list GA4 accounts and properties: ${err}`);
       }
-    }
+
+      const data = (await res.json()) as any;
+      const summaries = data.accountSummaries || [];
+
+      for (const acc of summaries) {
+        const accountName = acc.account || acc.name || '';
+        const accountId = accountName.replace('accounts/', '');
+        if (!accounts.some((a) => a.id === accountName)) {
+          accounts.push({
+            id: accountName,
+            name: accountName,
+            displayName: acc.displayName || `Account ${accountId}`,
+          });
+        }
+
+        const propSummaries = acc.propertySummaries || [];
+        for (const prop of propSummaries) {
+          const fullPropName = prop.property || ''; // "properties/123456789"
+          const cleanId = fullPropName.replace('properties/', '');
+          if (!properties.some((p) => p.propertyId === cleanId)) {
+            properties.push({
+              id: fullPropName,
+              propertyId: cleanId,
+              displayName: prop.displayName || `Property ${cleanId}`,
+              parentAccount: accountName,
+              timeZone: 'UTC', // Default until metadata query
+              currencyCode: 'USD',
+              propertyType: prop.propertyType || 'PROPERTY_TYPE_ORDINARY',
+            });
+          }
+        }
+      }
+
+      pageToken = data.nextPageToken;
+    } while (pageToken);
 
     return { accounts, properties };
   }
@@ -101,7 +141,7 @@ export class GoogleAnalytics4Provider implements AnalyticsProvider {
       payload.metricFilter = options.metricFilter;
     }
 
-    const res = await fetch(url, {
+    const res = await this.fetchWithRetry(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -113,11 +153,17 @@ export class GoogleAnalytics4Provider implements AnalyticsProvider {
 
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      if (res.status === 401 || res.status === 403) {
-        throw new Error(`GA4_AUTH_ERROR (${res.status}): Permission denied or token expired for property ${propertyId}: ${err}`);
+      if (res.status === 401) {
+        throw new Error(`GA4_AUTH_REVOKED (401): GA4 access token invalid: ${err}`);
+      }
+      if (res.status === 403) {
+        throw new Error(`GA4_INSUFFICIENT_SCOPE (403): Permission denied for property ${propertyId}: ${err}`);
+      }
+      if (res.status === 404) {
+        throw new Error(`GA4_PROPERTY_NOT_FOUND (404): GA4 property '${propertyId}' not found: ${err}`);
       }
       if (res.status === 429) {
-        throw new Error(`GA4_RATE_LIMITED (${res.status}): GA4 Data API quota exceeded: ${err}`);
+        throw new Error(`GA4_RATE_LIMITED (429): GA4 Data API quota exceeded: ${err}`);
       }
       throw new Error(`GA4_REPORT_FAILED (${res.status}): GA4 runReport failed: ${err}`);
     }
@@ -151,6 +197,8 @@ export class GoogleAnalytics4Provider implements AnalyticsProvider {
       retrievedAt: new Date().toISOString(),
       provenance: 'MEASURED_PROVIDER',
       samplingMetadata: metadata.samplingMetadatas,
+      subjectToThresholding: metadata.subjectToThresholding || false,
+      dataLossFromOtherRow: metadata.dataLossFromOtherRow || false,
     };
   }
 

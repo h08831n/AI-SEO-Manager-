@@ -167,11 +167,11 @@ describe('Phase 2 Production Crawler Intelligence Unit & Lifecycle Tests', () =>
   });
 
   describe('4. Crawl Lifecycle: Pause, Resume, and Cancel', () => {
-    it('handles pause, resume, and cancel signals gracefully', () => {
+    it('handles pause, resume, and cancel signals gracefully', async () => {
       const runId = 'crawl-run-mock-123';
       expect(CrawlCoordinator.pauseCrawl(runId)).toBe(true);
       expect(CrawlCoordinator.resumeCrawl(runId)).toBe(true);
-      expect(CrawlCoordinator.cancelCrawl(runId)).toBe(true);
+      expect(await CrawlCoordinator.cancelCrawl(runId)).toBe(true);
     });
   });
 });

@@ -95,6 +95,37 @@ export class WebsiteRepository {
     return site;
   }
 
+  public static async findGlobalById(id: string): Promise<WebsiteRecord | null> {
+    const prisma = getPrismaClient();
+    if (prisma) {
+      try {
+        const w = await prisma.website.findUnique({
+          where: { id },
+        });
+        if (!w) return null;
+        return {
+          id: w.id,
+          workspaceId: w.workspaceId,
+          domain: w.domain,
+          name: w.name,
+          productionUrl: w.productionUrl,
+          sitemapUrl: w.sitemapUrl,
+          defaultLanguage: w.defaultLanguage,
+          industry: w.industry,
+          createdAt: w.createdAt.toISOString(),
+          updatedAt: w.updatedAt.toISOString(),
+        };
+      } catch (err) {
+        if (isProductionMode()) {
+          throw new Error(`PERSISTENCE_UNAVAILABLE: findGlobalById failed: ${err}`);
+        }
+      }
+    }
+
+    const site = devWebsitesStore.get(id);
+    return site || null;
+  }
+
   public static async getByDomain(domain: string, workspaceId: string): Promise<WebsiteRecord | null> {
     const prisma = getPrismaClient();
     if (prisma) {
