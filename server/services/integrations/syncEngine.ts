@@ -93,6 +93,7 @@ export class IntegrationSyncEngine {
       const siteFacts = siteResult.rows.map((row) => ({
         websiteId,
         syncRunId: syncRun.id,
+        providerPropertyId: gscBinding.providerPropertyId,
         date: new Date(row.date || startDateStr),
         grain: 'SITE_DAILY' as const,
         clicks: row.clicks,
@@ -138,6 +139,7 @@ export class IntegrationSyncEngine {
           const facts = queryResult.rows.map((row) => ({
             websiteId,
             syncRunId: syncRun.id,
+            providerPropertyId: gscBinding.providerPropertyId,
             date: new Date(row.date || startDateStr),
             grain: 'PAGE_QUERY_DAILY' as const,
             pageUrl: row.page || '',
@@ -318,6 +320,7 @@ export class IntegrationSyncEngine {
           return {
             websiteId,
             syncRunId: syncRun.id,
+            providerPropertyId: ga4Binding.providerPropertyId,
             date: dateObj,
             landingPageUrl: normalizedLanding,
             channelGroup,
@@ -386,6 +389,7 @@ export class IntegrationSyncEngine {
           return {
             websiteId,
             syncRunId: syncRun.id,
+            providerPropertyId: ga4Binding.providerPropertyId,
             date: dateObj,
             defaultChannelGroup,
             sessions: Math.round(r.metricValues[0] || 0),
