@@ -180,6 +180,13 @@ model Website {
   tasks            SeoTask[]
   actionExecutions ActionExecution[]
   topicClusters    TopicCluster[]
+  seoEntities      SeoEntity[]
+  keywords         KeywordUniverse[]
+  serpSnapshots    SerpSnapshot[]
+  keywordRankFacts KeywordRankDaily[]
+  serpEvents       SerpSnapshotEvent[]
+  competitorDomains CompetitorDomain[]
+  competitorFacts  CompetitorDailyFact[]
   auditLogs        AuditLog[]
   jobRuns          JobRun[]
 
@@ -976,3 +983,398 @@ model OutboxEvent {
   @@index([status, nextAttemptAt, createdAt])
   @@map("outbox_events")
 }
+
+// ----------------------------------------------------
+// Phase 4: Rank Tracking, SERP Intelligence & Entity Graph
+// ----------------------------------------------------
+
+enum SearchIntent {
+  INFORMATIONAL
+  NAVIGATIONAL
+  COMMERCIAL
+  TRANSACTIONAL
+}
+
+enum FunnelStage {
+  TOFU
+  MOFU
+  BOFU
+  RETENTION
+}
+
+enum BusinessValueTier {
+  TIER_1_CRITICAL
+  TIER_2_HIGH
+  TIER_3_MEDIUM
+  TIER_4_LOW
+  TIER_5_BENCHMARK
+}
+
+enum KeywordTrackingStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum KeywordDiscoverySource {
+  MANUAL_SEED
+  GSC_INGESTION
+  CRAWL_EXTRACTION
+  COMPETITOR_GAP
+  AI_EXPANSION
+}
+
+enum SerpFeatureType {
+  AI_OVERVIEW
+  FEATURED_SNIPPET
+  PEOPLE_ALSO_ASK
+  LOCAL_PACK
+  KNOWLEDGE_PANEL
+  TOP_STORIES
+  VIDEO_CAROUSEL
+  IMAGE_PACK
+  SHOPPING_ADS
+  SITE_LINKS
+  POPULAR_PRODUCTS
+  DISCUSSION_FORUMS
+}
+
+enum SerpDevice {
+  DESKTOP
+  MOBILE
+}
+
+enum SerpEventType {
+  SERP_LAYOUT_CHANGED
+  AI_OVERVIEW_APPEARED
+  AI_OVERVIEW_DISAPPEARED
+  FEATURED_SNIPPET_GAINED
+  FEATURED_SNIPPET_LOST
+  OUR_URL_LOST_POSITION
+  OUR_URL_GAINED_POSITION
+  COMPETITOR_ENTERED_TOP10
+  COMPETITOR_OUTRANKED_US
+  KEYWORD_CANNIBALIZATION_DETECTED
+  KEYWORD_STRIKING_DISTANCE_REACHED
+}
+
+enum EntityType {
+  PRODUCT
+  SERVICE
+  BRAND
+  CONCEPT
+  FEATURE
+}
+
+model SeoEntity {
+  id                   String            @id @default(uuid())
+  websiteId            String
+  name                 String
+  slug                 String
+  entityType           EntityType        @default(CONCEPT)
+  description          String?
+  targetConversionGoal String?           // e.g. "Demo Signup", "Pricing Quote"
+  pillarUrl            String?
+  pillarUrlIdentityId  String?
+  businessValue        BusinessValueTier @default(TIER_2_HIGH)
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  website              Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keywords             KeywordUniverse[]
+
+  @@unique([websiteId, slug])
+  @@index([websiteId, entityType])
+  @@map("seo_entities")
+}
+
+model KeywordUniverse {
+  id                  String                @id @default(uuid())
+  websiteId           String
+  keyword             String                // Display keyword string
+  normalizedKeyword   String                // Lowercase, trimmed query
+  
+  // Intent & Classification
+  searchIntent        SearchIntent          @default(INFORMATIONAL)
+  intentConfidence    Float                 @default(0.8)
+  funnelStage         FunnelStage           @default(TOFU)
+  businessValue       BusinessValueTier     @default(TIER_3_MEDIUM)
+  conversionIntent    Boolean               @default(false)
+  moneyKeyword        Boolean               @default(false)
+  
+  // Entity Graph & Target URL Linkage
+  topicEntityId       String?
+  topicEntityName     String?
+  conversionGoal      String?
+  targetUrl           String?
+  targetUrlIdentityId String?
+  clusterId           String?
+  
+  // Tracking & Lifecycle
+  trackingStatus      KeywordTrackingStatus @default(ACTIVE)
+  priority            Int                   @default(3) // 1-5
+  tags                String[]              @default([])
+  discoverySource     KeywordDiscoverySource @default(MANUAL_SEED)
+  
+  // Search Metrics & Provenance
+  searchVolume        Int?
+  cpc                 Float?
+  competitionIndex    Float?
+  metricSource        String?               // KEYWORD_PLANNER, DATAFORSEO, MANUAL
+  metricRetrievedAt   DateTime?
+  
+  // Latest Snapshot Cached Ranks
+  currentDesktopRank  Int?
+  currentMobileRank   Int?
+  previousDesktopRank Int?
+  previousMobileRank  Int?
+  bestRank            Int?
+  firstRankedDate     DateTime?
+  lastTrackedAt       DateTime?
+  
+  // Data Provenance
+  provenanceSource    String                @default("MANUAL")
+  provenanceMethod    String                @default("INITIAL_IMPORT")
+  provenanceTimestamp DateTime              @default(now())
+
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  website             Website               @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  seoEntity           SeoEntity?            @relation(fields: [topicEntityId], references: [id], onDelete: SetNull)
+  rankDailyFacts      KeywordRankDaily[]
+  serpSnapshots       SerpSnapshot[]
+  serpEvents          SerpSnapshotEvent[]
+
+  @@unique([websiteId, normalizedKeyword])
+  @@index([websiteId, trackingStatus])
+  @@index([websiteId, searchIntent])
+  @@index([websiteId, businessValue])
+  @@index([websiteId, funnelStage])
+  @@index([topicEntityId])
+  @@map("keyword_universe")
+}
+
+model SerpSnapshot {
+  id                  String                @id @default(uuid())
+  websiteId           String
+  keywordId           String
+  keywordText         String
+  device              SerpDevice            @default(DESKTOP)
+  countryCode         String                @default("US")
+  languageCode        String                @default("en")
+  locationCode        String?
+  
+  provider            String                // MOCK, DATAFORSEO, SERPAPI, GOOGLE_CSE
+  rawPayloadHash      String
+  rawResponseJson     String?               // Short-term JSON payload
+  
+  totalResults        BigInt?
+  searchEngine        String                @default("google")
+  
+  // Target Domain Position In Snapshot
+  ourRank             Int?
+  ourRankedUrl        String?
+  ourUrlIdentityId    String?
+  ourPixelTop         Int?
+  hasMultipleRankings Boolean               @default(false)
+  
+  // Data Provenance
+  provenanceSource    String                @default("SERP_PROVIDER")
+  provenanceMethod    String                @default("API_POLL")
+  provenanceTimestamp DateTime              @default(now())
+  
+  snapshotDate        DateTime              @default(now())
+  createdAt           DateTime              @default(now())
+
+  website             Website               @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keyword             KeywordUniverse       @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  serpItems           SerpItem[]
+  featureOccurrences  SerpFeatureOccurrence[]
+  eventsEmitted       SerpSnapshotEvent[]
+
+  @@index([websiteId, keywordId, snapshotDate])
+  @@index([websiteId, snapshotDate])
+  @@map("serp_snapshots")
+}
+
+model SerpItem {
+  id                  String                @id @default(uuid())
+  snapshotId          String
+  position            Int                   // 1-100
+  domain              String                // Normalized root domain
+  url                 String
+  title               String?
+  snippet             String?
+  displayUrl          String?
+  
+  isTargetWebsite     Boolean               @default(false)
+  urlIdentityId       String?
+  
+  pixelHeight         Int?
+  pixelTop            Int?
+  
+  createdAt           DateTime              @default(now())
+
+  snapshot            SerpSnapshot          @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@unique([snapshotId, position])
+  @@index([snapshotId, domain])
+  @@index([domain, position])
+  @@map("serp_items")
+}
+
+model SerpFeatureOccurrence {
+  id                   String               @id @default(uuid())
+  snapshotId           String
+  featureType          SerpFeatureType
+  position             Int                  // Visual position index
+  
+  title                String?
+  snippet              String?
+  targetUrl            String?
+  domain               String?
+  sourceUrls           String[]             @default([])
+  
+  isTargetWebsiteCited Boolean              @default(false)
+  targetUrlIdentityId  String?
+  
+  pixelHeight          Int?
+  pixelTop             Int?
+  rawFeatureJson       String?
+  
+  createdAt            DateTime             @default(now())
+
+  snapshot             SerpSnapshot         @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@index([snapshotId, featureType])
+  @@index([featureType, isTargetWebsiteCited])
+  @@map("serp_feature_occurrences")
+}
+
+model KeywordRankDaily {
+  id                    String              @id @default(uuid())
+  websiteId             String
+  keywordId             String
+  date                  DateTime            @db.Date
+  device                SerpDevice          @default(DESKTOP)
+  countryCode           String              @default("US")
+  
+  rank                  Int?
+  previousRank          Int?
+  rankChange            Int?
+  
+  rankedUrl             String?
+  rankedUrlIdentityId   String?
+  isTargetUrlMatched    Boolean             @default(false)
+  
+  // Feature Aggregates
+  hasFeaturedSnippet    Boolean             @default(false)
+  hasAiOverviewCitation Boolean             @default(false)
+  aiOverviewOnSerp      Boolean             @default(false)
+  totalFeaturesOnSerp   Int                 @default(0)
+  
+  // Visibility Scoring
+  visibilityWeight      Float               @default(0.0)
+  visibilityScore       Float               @default(0.0)
+  ctrModelUsed          String              @default("STANDARD_ORGANIC_V1")
+  
+  snapshotId            String?
+  
+  // Provenance
+  provenanceSource      String              @default("SERP_INGESTION")
+  provenanceMethod      String              @default("DAILY_AGGREGATE")
+  provenanceTimestamp   DateTime            @default(now())
+
+  createdAt             DateTime            @default(now())
+
+  website               Website             @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keyword               KeywordUniverse     @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, keywordId, device, countryCode, date])
+  @@index([websiteId, date])
+  @@index([websiteId, keywordId, date])
+  @@map("keyword_rank_daily")
+}
+
+model SerpSnapshotEvent {
+  id               String            @id @default(uuid())
+  websiteId        String
+  keywordId        String
+  snapshotId       String?
+  eventType        SerpEventType
+  severity         String            @default("INFO") // INFO, WARNING, CRITICAL
+  
+  description      String
+  metadataJson     String
+  
+  recommendationId String?
+  isActionable     Boolean           @default(false)
+  isAcknowledged   Boolean           @default(false)
+  
+  createdAt        DateTime          @default(now())
+
+  website          Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keyword          KeywordUniverse   @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  snapshot         SerpSnapshot?     @relation(fields: [snapshotId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId, eventType])
+  @@index([websiteId, createdAt])
+  @@map("serp_snapshot_events")
+}
+
+model CompetitorDomain {
+  id                  String                @id @default(uuid())
+  websiteId           String
+  domain              String                // "competitor.com"
+  name                String?
+  isDirectCompetitor  Boolean               @default(true)
+  isExcluded          Boolean               @default(false)
+  isPlatform          Boolean               @default(false)
+  exclusionReason     String?
+  
+  sharedKeywordsCount Int                   @default(0)
+  outrankingCount     Int                   @default(0)
+  outrankedByUsCount  Int                   @default(0)
+  averagePosition     Float                 @default(0.0)
+  visibilityIndex     Float                 @default(0.0)
+  
+  provenanceSource    String                @default("DISCOVERY_ENGINE")
+  provenanceMethod    String                @default("SERP_OVERLAP_ANALYSIS")
+  provenanceTimestamp DateTime              @default(now())
+
+  lastCalculatedAt    DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  website             Website               @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  dailyFacts          CompetitorDailyFact[]
+
+  @@unique([websiteId, domain])
+  @@index([websiteId, isDirectCompetitor])
+  @@map("competitor_domains")
+}
+
+model CompetitorDailyFact {
+  id                   String           @id @default(uuid())
+  websiteId            String
+  competitorId         String
+  date                 DateTime         @db.Date
+  
+  sharedKeywords       Int              @default(0)
+  top3Keywords         Int              @default(0)
+  top10Keywords        Int              @default(0)
+  averagePosition      Float            @default(0.0)
+  visibilityScore      Float            @default(0.0)
+  visibilityDifference Float            @default(0.0)
+  
+  createdAt            DateTime         @default(now())
+
+  website              Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  competitor           CompetitorDomain @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@unique([competitorId, date])
+  @@index([websiteId, date])
+  @@map("competitor_daily_facts")
+}
+

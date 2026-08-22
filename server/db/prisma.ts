@@ -208,6 +208,15 @@ const fallbackClient: any = {
   ga4LandingPageDaily: createInMemoryTable('ga4LandingPageDaily'),
   ga4ChannelDaily: createInMemoryTable('ga4ChannelDaily'),
   oAuthStateSession: createInMemoryTable('oAuthStateSession'),
+  seoEntity: createInMemoryTable('seoEntity'),
+  keywordUniverse: createInMemoryTable('keywordUniverse'),
+  serpSnapshot: createInMemoryTable('serpSnapshot'),
+  serpItem: createInMemoryTable('serpItem'),
+  serpFeatureOccurrence: createInMemoryTable('serpFeatureOccurrence'),
+  keywordRankDaily: createInMemoryTable('keywordRankDaily'),
+  serpSnapshotEvent: createInMemoryTable('serpSnapshotEvent'),
+  competitorDomain: createInMemoryTable('competitorDomain'),
+  competitorDailyFact: createInMemoryTable('competitorDailyFact'),
 };
 
 const realPrisma = getPrismaClient();

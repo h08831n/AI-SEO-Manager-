@@ -96,10 +96,10 @@ export class WebsiteRepository {
   }
 
   public static async findGlobalById(id: string): Promise<WebsiteRecord | null> {
-    const prisma = getPrismaClient();
-    if (prisma) {
+    const prismaClient = getPrismaClient();
+    if (prismaClient) {
       try {
-        const w = await prisma.website.findUnique({
+        const w = await prismaClient.website.findUnique({
           where: { id },
         });
         if (!w) return null;
@@ -120,6 +120,28 @@ export class WebsiteRepository {
           throw new Error(`PERSISTENCE_UNAVAILABLE: findGlobalById failed: ${err}`);
         }
       }
+    }
+
+    // Fallback: check in-memory prisma
+    try {
+      const { prisma: dbPrisma } = await import('../db/prisma');
+      const w = await dbPrisma.website.findUnique({ where: { id } });
+      if (w) {
+        return {
+          id: w.id,
+          workspaceId: w.workspaceId || 'default-workspace',
+          domain: w.domain,
+          name: w.name,
+          productionUrl: w.productionUrl || `https://${w.domain}`,
+          sitemapUrl: w.sitemapUrl,
+          defaultLanguage: w.defaultLanguage || 'en',
+          industry: w.industry,
+          createdAt: (w.createdAt || new Date()).toISOString(),
+          updatedAt: (w.updatedAt || new Date()).toISOString(),
+        };
+      }
+    } catch {
+      // fallback
     }
 
     const site = devWebsitesStore.get(id);

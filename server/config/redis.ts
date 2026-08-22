@@ -19,3 +19,7 @@ export class RedisConnectionFactory {
     });
   }
 }
+
+export function getRedisConnection(): IORedis {
+  return RedisConnectionFactory.createClient();
+}

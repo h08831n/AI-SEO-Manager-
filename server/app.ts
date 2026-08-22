@@ -10,6 +10,14 @@ import websiteRoutes from './routes/websiteRoutes';
 import integrationRoutes from './routes/integrationRoutes';
 import taskRoutes from './routes/taskRoutes';
 import observabilityRoutes from './routes/observabilityRoutes';
+import { keywordRoutes } from './routes/keywordRoutes';
+import { serpRoutes } from './routes/serpRoutes';
+import { competitorRoutes } from './routes/competitorRoutes';
+
+// Support BigInt serialization in JSON responses
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
 
 export function createApp() {
   const app = express();
@@ -63,6 +71,9 @@ export function createApp() {
   app.use('/api', integrationRoutes);
   app.use('/api/tasks', taskRoutes);
   app.use('/api/observability', observabilityRoutes);
+  app.use('/api/keywords', keywordRoutes);
+  app.use('/api/serp', serpRoutes);
+  app.use('/api/competitors', competitorRoutes);
 
   // Legacy route aliases for backward compatibility
   app.post('/api/crawl', (req, res, next) => {
