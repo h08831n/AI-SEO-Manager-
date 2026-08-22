@@ -11,6 +11,9 @@ export interface SerpJobData {
   device?: SerpDevice;
   countryCode?: string;
   correlationId?: string;
+  idempotencyKey?: string;
+  timeoutMs?: number;
+  preferredProvider?: string;
 }
 
 export class SerpQueueProducer {
@@ -35,21 +38,42 @@ export class SerpQueueProducer {
     return this.queue;
   }
 
-  static async enqueueSerpCheck(data: SerpJobData): Promise<string> {
+  static async enqueueSerpCheck(data: SerpJobData, options?: { force?: boolean }): Promise<{ jobId: string; deduplicated: boolean }> {
     const queue = this.getQueue();
-    const jobId = `serp-${data.websiteId}-${data.keywordId || 'batch'}-${Date.now()}`;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const idempotencyKey =
+      data.idempotencyKey ||
+      `serp-${data.websiteId}-${data.keywordId || 'batch'}-${data.device || 'DESKTOP'}-${dateStr}`;
 
-    // 1. Audit outbox event
+    // 1. Idempotency check: avoid duplicate pending or active jobs unless force=true
+    if (!options?.force) {
+      const existingJob = await prisma.jobRun.findFirst({
+        where: {
+          websiteId: data.websiteId,
+          queueName: 'serp-intelligence-queue',
+          jobId: idempotencyKey,
+          status: { in: ['PENDING', 'PROCESSING'] },
+        },
+      });
+
+      if (existingJob) {
+        return { jobId: existingJob.jobId || existingJob.id, deduplicated: true };
+      }
+    }
+
+    const jobId = idempotencyKey;
+
+    // 2. Audit outbox event: QUEUE_CREATED
     await prisma.outboxEvent.create({
       data: {
         aggregateType: 'SERP_CHECK',
         aggregateId: data.keywordId || data.websiteId,
-        eventType: data.jobType,
-        payloadJson: JSON.stringify(data),
+        eventType: 'QUEUE_CREATED',
+        payloadJson: JSON.stringify({ ...data, jobId }),
       },
     });
 
-    // 2. Track JobRun in DB
+    // 3. Track JobRun in DB with status PENDING
     await prisma.jobRun.create({
       data: {
         websiteId: data.websiteId,
@@ -58,15 +82,17 @@ export class SerpQueueProducer {
         jobId,
         payloadJson: JSON.stringify(data),
         status: 'PENDING',
+        attempts: 0,
+        maxAttempts: 3,
       },
     });
 
     try {
       await queue.add(data.jobType, data, { jobId });
     } catch {
-      // In-memory / direct mode fallback
+      // In-memory / direct test environment
     }
 
-    return jobId;
+    return { jobId, deduplicated: false };
   }
 }

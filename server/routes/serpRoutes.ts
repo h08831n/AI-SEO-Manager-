@@ -15,13 +15,13 @@ serpRoutes.post('/websites/:websiteId/keywords/:keywordId/check', requireWebsite
     const { device = SerpDevice.DESKTOP, async: runAsync = false } = req.body;
 
     if (runAsync) {
-      const jobId = await SerpQueueProducer.enqueueSerpCheck({
+      const { jobId, deduplicated } = await SerpQueueProducer.enqueueSerpCheck({
         jobType: 'SERP_KEYWORD_CHECK',
         websiteId,
         keywordId,
         device: device as SerpDevice,
       });
-      return res.status(202).json({ success: true, queued: true, jobId });
+      return res.status(202).json({ success: true, queued: true, jobId, deduplicated });
     }
 
     const result = await SerpExecutionService.executeKeywordSerpCheck({
@@ -47,13 +47,13 @@ serpRoutes.post('/websites/:websiteId/batch-check', requireWebsiteAccess('EDITOR
     }
 
     if (runAsync) {
-      const jobId = await SerpQueueProducer.enqueueSerpCheck({
+      const { jobId, deduplicated } = await SerpQueueProducer.enqueueSerpCheck({
         jobType: 'SERP_BATCH_DISPATCH',
         websiteId,
         keywordIds,
         device: device as SerpDevice,
       });
-      return res.status(202).json({ success: true, queued: true, jobId });
+      return res.status(202).json({ success: true, queued: true, jobId, deduplicated });
     }
 
     const result = await SerpExecutionService.batchExecuteKeywordChecks(websiteId, keywordIds, device as SerpDevice);

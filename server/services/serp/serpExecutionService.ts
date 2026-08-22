@@ -1,10 +1,22 @@
 import { prisma } from '../../db/prisma';
-import { SerpProviderRouter } from './providers/serpApiAdapter';
+import { SerpProviderRouter } from './providers/serpProviderRouter';
+import { ISerpProvider } from './providers/serpProvider';
 import { SerpRepository } from '../../repositories/serpRepository';
 import { SerpEventEngine } from './serpEventEngine';
 import { KeywordRepository } from '../../repositories/keywordRepository';
 import { CompetitorRepository } from '../../repositories/competitorRepository';
+import { SerpProviderTimeoutError } from './serpErrors';
 import { SerpDevice } from '@prisma/client';
+
+export type SerpExecutionLifecycleStage =
+  | 'QUEUE_CREATED'
+  | 'PROCESSING'
+  | 'PROVIDER_FETCH'
+  | 'SNAPSHOT_CREATED'
+  | 'RANK_FACT_CREATED'
+  | 'EVENT_ANALYSIS'
+  | 'RECOMMENDATION_CREATED'
+  | 'COMPLETED';
 
 export interface ExecuteSerpCheckInput {
   websiteId: string;
@@ -12,11 +24,48 @@ export interface ExecuteSerpCheckInput {
   device?: SerpDevice;
   countryCode?: string;
   preferredProvider?: string;
+  timeoutMs?: number;
+  onLifecycleStage?: (stage: SerpExecutionLifecycleStage, metadata?: any) => Promise<void> | void;
+}
+
+export interface SerpExecutionResult {
+  success: boolean;
+  keywordId: string;
+  keyword: string;
+  device: SerpDevice;
+  currentRank: number | null;
+  previousRank: number | null;
+  visibility: any;
+  snapshotId: string;
+  emittedEvents: any[];
+  lifecycleStages: SerpExecutionLifecycleStage[];
+  recommendationsCount: number;
 }
 
 export class SerpExecutionService {
-  static async executeKeywordSerpCheck(input: ExecuteSerpCheckInput) {
-    const { websiteId, keywordId, device = SerpDevice.DESKTOP, countryCode = 'US', preferredProvider } = input;
+  static async executeKeywordSerpCheck(input: ExecuteSerpCheckInput): Promise<SerpExecutionResult> {
+    const {
+      websiteId,
+      keywordId,
+      device = SerpDevice.DESKTOP,
+      countryCode = 'US',
+      preferredProvider,
+      timeoutMs = 15000,
+      onLifecycleStage,
+    } = input;
+
+    const completedStages: SerpExecutionLifecycleStage[] = [];
+
+    const reportStage = async (stage: SerpExecutionLifecycleStage, meta?: any) => {
+      completedStages.push(stage);
+      if (onLifecycleStage) {
+        try {
+          await onLifecycleStage(stage, meta);
+        } catch {
+          // ignore stage listener failures
+        }
+      }
+    };
 
     // 1. Load Keyword & Website
     const keyword = await prisma.keywordUniverse.findFirst({
@@ -29,17 +78,35 @@ export class SerpExecutionService {
 
     const website = (keyword as any).website || (await prisma.website.findUnique({ where: { id: websiteId } }));
     const targetDomain = website?.domain || 'example.com';
-    const provider = SerpProviderRouter.getProvider(preferredProvider);
 
-    // 2. Fetch SERP
-    const rawResponse = await provider.fetchSerp({
+    // Provider router resolution (Service -> SerpProviderRouter -> ISerpProvider)
+    const provider: ISerpProvider = SerpProviderRouter.getProvider(preferredProvider);
+
+    // 2. Stage: PROVIDER_FETCH with timeout safety
+    await reportStage('PROVIDER_FETCH', { provider: provider.providerName, keyword: keyword.keyword });
+
+    let fetchPromise = provider.fetchSerp({
       keyword: keyword.keyword,
       device,
       countryCode,
       targetDomain,
     });
 
-    // 3. Save Snapshot, Features, and Daily Rank Fact
+    let timer: any;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new SerpProviderTimeoutError(`Provider ${provider.providerName} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    let rawResponse;
+    try {
+      rawResponse = await Promise.race([fetchPromise, timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // 3. Stage: SNAPSHOT_CREATED
     const { snapshot, rankDailyFact, previousSnapshotRank, currentRank, visibility, targetResults } =
       await SerpRepository.saveSerpSnapshotAndFacts({
         websiteId,
@@ -49,13 +116,23 @@ export class SerpExecutionService {
         searchVolume: keyword.searchVolume,
       });
 
-    // 4. Update Cached Latest Rank in Keyword Universe
+    await reportStage('SNAPSHOT_CREATED', { snapshotId: snapshot.id, currentRank });
+
+    // 4. Stage: RANK_FACT_CREATED
     await KeywordRepository.updateLatestRank(keywordId, {
       desktopRank: device === SerpDevice.DESKTOP ? currentRank : undefined,
       mobileRank: device === SerpDevice.MOBILE ? currentRank : undefined,
     });
 
-    // 5. Evaluate and Emit SERP Events & Recommendations
+    await reportStage('RANK_FACT_CREATED', {
+      rankDailyFactId: rankDailyFact.id,
+      currentRank,
+      visibilityScore: visibility.visibilityScore,
+    });
+
+    // 5. Stage: EVENT_ANALYSIS
+    await reportStage('EVENT_ANALYSIS', { previousRank: previousSnapshotRank, currentRank });
+
     const events = await SerpEventEngine.evaluateAndEmitEvents({
       websiteId,
       keywordId,
@@ -70,6 +147,17 @@ export class SerpExecutionService {
       targetDomain,
     });
 
+    // 6. Stage: RECOMMENDATION_CREATED (if any events generated actionable recommendations)
+    const actionableEvents = events.filter((e) => e.isActionable && e.recommendationId);
+    if (actionableEvents.length > 0) {
+      await reportStage('RECOMMENDATION_CREATED', {
+        count: actionableEvents.length,
+        recommendationIds: actionableEvents.map((e) => e.recommendationId),
+      });
+    }
+
+    await reportStage('COMPLETED');
+
     return {
       success: true,
       keywordId,
@@ -80,6 +168,8 @@ export class SerpExecutionService {
       visibility,
       snapshotId: snapshot.id,
       emittedEvents: events,
+      lifecycleStages: completedStages,
+      recommendationsCount: actionableEvents.length,
     };
   }
 

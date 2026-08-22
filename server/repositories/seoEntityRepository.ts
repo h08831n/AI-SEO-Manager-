@@ -49,6 +49,46 @@ export class SeoEntityRepository {
     });
   }
 
+  static async upsertEntity(input: CreateSeoEntityInput & { targetUrls?: string[] }) {
+    const slug = input.slug || this.generateSlug(input.name);
+    const existing = await prisma.seoEntity.findFirst({
+      where: { websiteId: input.websiteId, slug },
+    });
+
+    if (existing) {
+      return await prisma.seoEntity.update({
+        where: { id: existing.id },
+        data: {
+          name: input.name,
+          entityType: input.entityType || existing.entityType,
+          description: input.description !== undefined ? input.description : existing.description,
+          pillarUrl: input.pillarUrl || (input.targetUrls?.[0] ?? existing.pillarUrl),
+          businessValue: input.businessValue || existing.businessValue,
+        },
+      });
+    }
+
+    return await prisma.seoEntity.create({
+      data: {
+        websiteId: input.websiteId,
+        name: input.name,
+        slug,
+        entityType: input.entityType || EntityType.CONCEPT,
+        description: input.description,
+        targetConversionGoal: input.targetConversionGoal,
+        pillarUrl: input.pillarUrl || input.targetUrls?.[0],
+        pillarUrlIdentityId: input.pillarUrlIdentityId,
+        businessValue: input.businessValue || BusinessValueTier.TIER_2_HIGH,
+      },
+    });
+  }
+
+  static async getEntityKeywords(entityId: string) {
+    return await prisma.keywordUniverse.findMany({
+      where: { topicEntityId: entityId },
+    });
+  }
+
   static async getEntityById(id: string, websiteId: string) {
     const entity: any = await prisma.seoEntity.findFirst({
       where: { id, websiteId },

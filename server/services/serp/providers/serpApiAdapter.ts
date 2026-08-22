@@ -2,7 +2,6 @@ import crypto from 'crypto';
 import { ISerpProvider, SerpQueryRequest, RawSerpResponse, RawOrganicResult, RawSerpFeatureItem } from './serpProvider';
 import { SerpFeatureType, SerpDevice } from '@prisma/client';
 import { MockSerpProvider } from './mockSerpProvider';
-import { DataForSeoAdapter } from './dataForSeoAdapter';
 
 export class SerpApiAdapter implements ISerpProvider {
   readonly providerName = 'SERPAPI';
@@ -110,21 +109,5 @@ export class SerpApiAdapter implements ISerpProvider {
       const res = await mock.fetchSerp(req);
       return { ...res, provider: this.providerName };
     }
-  }
-}
-
-export class SerpProviderRouter {
-  private static mockProvider = new MockSerpProvider();
-  private static dataForSeo = new DataForSeoAdapter();
-  private static serpApi = new SerpApiAdapter();
-
-  static getProvider(preferred?: string): ISerpProvider {
-    if (preferred === 'DATAFORSEO' && this.dataForSeo.isConfigured()) {
-      return this.dataForSeo;
-    }
-    if (preferred === 'SERPAPI' && this.serpApi.isConfigured()) {
-      return this.serpApi;
-    }
-    return this.mockProvider;
   }
 }

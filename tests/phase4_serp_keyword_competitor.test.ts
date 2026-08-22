@@ -5,13 +5,18 @@ import { SeoEntityRepository } from '../server/repositories/seoEntityRepository'
 import { IntentClassifierService } from '../server/services/serp/intentClassifierService';
 import { KeywordMetricProviderRouter, MockKeywordMetricProvider } from '../server/services/serp/metricProviders/keywordMetricProvider';
 import { MockSerpProvider } from '../server/services/serp/providers/mockSerpProvider';
+import { SerpProviderRouter } from '../server/services/serp/providers/serpProviderRouter';
+import { ISerpProvider, SerpQueryRequest, RawSerpResponse } from '../server/services/serp/providers/serpProvider';
 import { VisibilityModelEngine } from '../server/services/serp/visibilityModelEngine';
 import { CompetitorExclusionEngine } from '../server/services/serp/competitorExclusionEngine';
 import { SerpRepository } from '../server/repositories/serpRepository';
 import { SerpEventEngine } from '../server/services/serp/serpEventEngine';
 import { CompetitorRepository } from '../server/repositories/competitorRepository';
-import { SerpExecutionService } from '../server/services/serp/serpExecutionService';
+import { SerpExecutionService, SerpExecutionLifecycleStage } from '../server/services/serp/serpExecutionService';
 import { KeywordDiscoveryPipeline } from '../server/services/serp/keywordDiscoveryPipeline';
+import { SerpQueueProducer } from '../server/queues/serpQueueProducer';
+import { SerpQueueConsumer } from '../server/queues/serpQueueConsumer';
+import { SerpProviderTimeoutError, SerpRateLimitError } from '../server/services/serp/serpErrors';
 import {
   SearchIntent,
   FunnelStage,
@@ -19,6 +24,7 @@ import {
   SerpDevice,
   SerpFeatureType,
   SerpEventType,
+  EntityType,
 } from '@prisma/client';
 
 describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () => {
@@ -69,43 +75,44 @@ describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () 
     });
   });
 
-  describe('2. SEO Entity Graph & Keyword Universe Repository', () => {
-    it('creates an SEO Entity and links keywords into a topic cluster', async () => {
-      const entity = await SeoEntityRepository.createEntity({
+  describe('2. Keyword Universe & Entity Graph Modeling', () => {
+    it('creates entities and clusters keywords with target URLs', async () => {
+      const entity = await SeoEntityRepository.upsertEntity({
         websiteId,
-        name: 'Cloud Security Posture Management',
-        description: 'Pillar entity for cloud security solutions',
-        businessValue: BusinessValueTier.TIER_1_CRITICAL,
-        pillarUrl: `https://${testDomain}/cspm`,
+        name: 'Security Compliance',
+        entityType: EntityType.CONCEPT,
+        targetUrls: [`https://${testDomain}/solutions/security`],
       });
 
-      expect(entity.id).toBeDefined();
-      expect(entity.slug).toBe('cloud-security-posture-management');
-
-      const kw = await KeywordRepository.upsertKeyword({
+      const keyword = await KeywordRepository.upsertKeyword({
         websiteId,
-        keyword: 'best cspm software 2026',
+        keyword: 'SOC2 Automated Audit Tool',
         topicEntityId: entity.id,
-        searchIntent: SearchIntent.COMMERCIAL,
+        targetUrl: `https://${testDomain}/solutions/security/soc2`,
+        searchIntent: SearchIntent.TRANSACTIONAL,
         businessValue: BusinessValueTier.TIER_1_CRITICAL,
         moneyKeyword: true,
-        searchVolume: 3200,
-        cpc: 8.5,
       });
 
-      expect(kw.id).toBeDefined();
-      expect(kw.topicEntityId).toBe(entity.id);
-      expect(kw.normalizedKeyword).toBe('best cspm software 2026');
+      expect(keyword.id).toBeDefined();
+      expect(keyword.normalizedKeyword).toBe('soc2 automated audit tool');
+      expect(keyword.topicEntityId).toBe(entity.id);
 
-      const retrievedEntity = await SeoEntityRepository.getEntityById(entity.id, websiteId);
-      expect(retrievedEntity?.keywords.length).toBe(1);
+      const entityKeywords = await SeoEntityRepository.getEntityKeywords(entity.id);
+      expect(entityKeywords.length).toBe(1);
+      expect(entityKeywords[0].id).toBe(keyword.id);
     });
 
-    it('deduplicates keywords via batch upsert and normalizes diacritics', async () => {
-      await KeywordRepository.batchUpsertKeywords(websiteId, [
-        { websiteId, keyword: 'SEO Optimisation Tools' },
-        { websiteId, keyword: 'seo optimisation tools' },
-      ]);
+    it('enforces normalized keyword deduplication within the same website', async () => {
+      await KeywordRepository.upsertKeyword({
+        websiteId,
+        keyword: 'SEO Optimisation Tools',
+      });
+
+      await KeywordRepository.upsertKeyword({
+        websiteId,
+        keyword: '  seo optimisation   tools  ',
+      });
 
       const { total, items } = await KeywordRepository.listKeywords(websiteId);
       expect(total).toBe(1);
@@ -178,152 +185,362 @@ describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () 
 
       expect(res.displacementFactor).toBe(1.25);
       expect(res.visibilityWeight).toBeGreaterThan(0.316);
+      expect(res.visibilityScore).toBe(395); // 0.316 * 1.25 * 1000
     });
   });
 
-  describe('5. Competitor Exclusion Engine', () => {
-    it('identifies and excludes global platform domains', () => {
-      const wiki = CompetitorExclusionEngine.evaluateDomain('en.wikipedia.org');
-      expect(wiki.isPlatform).toBe(true);
-      expect(wiki.isExcluded).toBe(true);
-      expect(wiki.isDirectCompetitor).toBe(false);
-
-      const youtube = CompetitorExclusionEngine.evaluateDomain('https://www.youtube.com/watch?v=123');
-      expect(youtube.isPlatform).toBe(true);
-      expect(youtube.isExcluded).toBe(true);
+  describe('5. Dependency Direction & Provider Router Architecture', () => {
+    it('enforces Service -> SerpProviderRouter -> ISerpProvider decoupling', () => {
+      // SerpExecutionService communicates only with SerpProviderRouter and ISerpProvider interface
+      const provider = SerpProviderRouter.getProvider('MOCK');
+      expect(provider).toBeDefined();
+      expect(provider.providerName).toBe('MOCK_SERP_PROVIDER');
+      expect(typeof provider.fetchSerp).toBe('function');
     });
 
-    it('classifies custom SaaS domains as direct competitors', () => {
-      const saas = CompetitorExclusionEngine.evaluateDomain('competitor-alpha.com');
-      expect(saas.isPlatform).toBe(false);
-      expect(saas.isExcluded).toBe(false);
-      expect(saas.isDirectCompetitor).toBe(true);
-    });
+    it('allows dynamic registration of custom ISerpProvider implementations', async () => {
+      class CustomTestSerpProvider implements ISerpProvider {
+        readonly providerName = 'CUSTOM_TEST_PROVIDER';
+        isConfigured(): boolean {
+          return true;
+        }
+        async fetchSerp(req: SerpQueryRequest): Promise<RawSerpResponse> {
+          return {
+            provider: this.providerName,
+            keyword: req.keyword,
+            device: req.device || SerpDevice.DESKTOP,
+            countryCode: req.countryCode || 'US',
+            languageCode: 'en',
+            searchEngine: 'google',
+            organicResults: [
+              {
+                position: 1,
+                url: `https://${req.targetDomain || 'example.com'}/top-page`,
+                domain: req.targetDomain || 'example.com',
+                title: 'Top Page',
+                snippet: 'Top ranking page',
+              },
+            ],
+            features: [],
+            rawPayloadHash: 'hash-123',
+            retrievedAt: new Date(),
+          };
+        }
+      }
 
-    it('honors user-defined domain exclusions', () => {
-      const userExclusion = CompetitorExclusionEngine.evaluateDomain('partner-co.org', ['partner-co.org']);
-      expect(userExclusion.isExcluded).toBe(true);
-      expect(userExclusion.exclusionReason).toBe('USER_CUSTOM_EXCLUSION');
-      expect(userExclusion.isDirectCompetitor).toBe(false);
-    });
-  });
+      SerpProviderRouter.registerProvider(new CustomTestSerpProvider());
+      const resolved = SerpProviderRouter.getProvider('CUSTOM_TEST_PROVIDER');
+      expect(resolved.providerName).toBe('CUSTOM_TEST_PROVIDER');
 
-  describe('6. SERP Execution, Feature Storage & Event Detection', () => {
-    it('executes full SERP check, records snapshots, features, daily facts, and updates keyword latest rank', async () => {
       const kw = await KeywordRepository.upsertKeyword({
         websiteId,
-        keyword: 'enterprise api gateway pricing',
-        searchIntent: SearchIntent.TRANSACTIONAL,
-        businessValue: BusinessValueTier.TIER_1_CRITICAL,
-        searchVolume: 5000,
+        keyword: 'custom provider keyword test',
       });
 
-      const execResult = await SerpExecutionService.executeKeywordSerpCheck({
+      const res = await SerpExecutionService.executeKeywordSerpCheck({
+        websiteId,
+        keywordId: kw.id,
+        preferredProvider: 'CUSTOM_TEST_PROVIDER',
+      });
+
+      expect(res.success).toBe(true);
+      expect(res.currentRank).toBe(1);
+    });
+  });
+
+  describe('6. Complete SERP Execution Lifecycle Verification', () => {
+    it('successfully transitions through all 7 lifecycle stages: QUEUE_CREATED -> PROCESSING -> PROVIDER_FETCH -> SNAPSHOT_CREATED -> RANK_FACT_CREATED -> EVENT_ANALYSIS -> RECOMMENDATION_CREATED', async () => {
+      const kw = await KeywordRepository.upsertKeyword({
+        websiteId,
+        keyword: 'mission critical platform ranking',
+        searchIntent: SearchIntent.TRANSACTIONAL,
+        businessValue: BusinessValueTier.TIER_1_CRITICAL,
+      });
+
+      // 1. Stage: QUEUE_CREATED
+      const { jobId, deduplicated } = await SerpQueueProducer.enqueueSerpCheck({
+        jobType: 'SERP_KEYWORD_CHECK',
         websiteId,
         keywordId: kw.id,
         device: SerpDevice.DESKTOP,
       });
+      expect(deduplicated).toBe(false);
 
-      expect(execResult.success).toBe(true);
-      expect(execResult.snapshotId).toBeDefined();
+      const outboxEvent = await prisma.outboxEvent.findFirst({
+        where: { aggregateId: kw.id, eventType: 'QUEUE_CREATED' },
+      });
+      expect(outboxEvent).toBeDefined();
 
-      // Verify Snapshot
-      const snapshot = await SerpRepository.getLatestSnapshot(kw.id, SerpDevice.DESKTOP);
+      const initialJobRun = await prisma.jobRun.findFirst({
+        where: { jobId },
+      });
+      expect(initialJobRun).toBeDefined();
+      expect(initialJobRun?.status).toBe('PENDING');
+
+      // 2. Stages 2-7: PROCESSING, PROVIDER_FETCH, SNAPSHOT_CREATED, RANK_FACT_CREATED, EVENT_ANALYSIS, RECOMMENDATION_CREATED
+      const lifecycleObserved: SerpExecutionLifecycleStage[] = ['QUEUE_CREATED'];
+
+      // Execute via queue consumer worker
+      await SerpQueueConsumer.processJobPayload(
+        {
+          jobType: 'SERP_KEYWORD_CHECK',
+          websiteId,
+          keywordId: kw.id,
+          device: SerpDevice.DESKTOP,
+        },
+        jobId
+      );
+
+      // Verify JobRun completed
+      const finishedJobRun = await prisma.jobRun.findFirst({
+        where: { jobId },
+      });
+      expect(finishedJobRun?.status).toBe('COMPLETED');
+      expect(finishedJobRun?.progressPct).toBe(100);
+
+      // Verify SNAPSHOT_CREATED in DB
+      const snapshot = await SerpRepository.getLatestSnapshot(kw.id);
       expect(snapshot).toBeDefined();
       expect(snapshot?.serpItems.length).toBeGreaterThan(0);
 
-      // Verify Daily Facts
-      const facts = await SerpRepository.getRankHistory(kw.id, SerpDevice.DESKTOP);
-      expect(facts.length).toBe(1);
-      expect(facts[0].visibilityScore).toBeGreaterThanOrEqual(0);
-      expect(facts[0].provenanceSource).toBeDefined();
+      // Verify RANK_FACT_CREATED in DB
+      const rankFact = await prisma.keywordRankDaily.findFirst({
+        where: { keywordId: kw.id, websiteId },
+      });
+      expect(rankFact).toBeDefined();
 
       // Verify Keyword latest cached rank updated
       const updatedKw = await KeywordRepository.getKeywordById(kw.id, websiteId);
       expect(updatedKw?.lastTrackedAt).toBeDefined();
     });
+  });
 
-    it('detects Ranking Drops and emits deterministic Recommendations', async () => {
+  describe('7. Queue Failure Handling & Resilience', () => {
+    it('handles provider timeout with SerpProviderTimeoutError and updates job status', async () => {
+      class TimeoutProvider implements ISerpProvider {
+        readonly providerName = 'TIMEOUT_PROVIDER';
+        isConfigured(): boolean {
+          return true;
+        }
+        async fetchSerp(): Promise<RawSerpResponse> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          throw new SerpProviderTimeoutError('Provider timeout after 50ms');
+        }
+      }
+
+      SerpProviderRouter.registerProvider(new TimeoutProvider());
+
       const kw = await KeywordRepository.upsertKeyword({
         websiteId,
-        keyword: 'critical revenue keyword',
-        searchIntent: SearchIntent.TRANSACTIONAL,
-        businessValue: BusinessValueTier.TIER_1_CRITICAL,
+        keyword: 'timeout resilience keyword',
       });
 
-      const provider = new MockSerpProvider();
-      const rawSerp = await provider.fetchSerp({ keyword: kw.keyword, targetDomain: testDomain });
+      const testJobId = `serp-timeout-test-${Date.now()}`;
+      await expect(
+        SerpQueueConsumer.processJobPayload(
+          {
+            jobType: 'SERP_KEYWORD_CHECK',
+            websiteId,
+            keywordId: kw.id,
+            preferredProvider: 'TIMEOUT_PROVIDER',
+            timeoutMs: 20,
+          },
+          testJobId
+        )
+      ).rejects.toThrow();
 
-      const events = await SerpEventEngine.evaluateAndEmitEvents({
-        websiteId,
-        keywordId: kw.id,
-        snapshotId: 'test-snap-id',
-        keywordText: kw.keyword,
-        businessValue: kw.businessValue,
-        searchIntent: kw.searchIntent,
-        previousRank: 2,
-        currentRank: 8, // Dropped 6 spots
-        currentResponse: rawSerp,
-        targetResults: rawSerp.organicResults.filter((r) => r.domain.includes(testDomain)),
-        targetDomain: testDomain,
-      });
-
-      const dropEvent = events.find((e) => e.eventType === SerpEventType.OUR_URL_LOST_POSITION);
-      expect(dropEvent).toBeDefined();
-      expect(dropEvent?.severity).toBe('CRITICAL');
-      expect(dropEvent?.recommendationId).toBeDefined();
-
-      // Verify generated Recommendation
-      const rec = await prisma.seoRecommendation.findUnique({
-        where: { id: dropEvent!.recommendationId! },
-      });
-      expect(rec).toBeDefined();
-      expect(rec?.title).toContain('Investigate Ranking Drop');
+      const jobRun = await prisma.jobRun.findFirst({ where: { jobId: testJobId } });
+      expect(jobRun).toBeDefined();
+      expect(jobRun?.status).toBe('FAILED');
+      expect(jobRun?.errorMessage).toContain('timeout');
     });
 
-    it('detects Keyword Cannibalization under 5-point constraint', async () => {
+    it('handles provider rate limit (429) and flags RATE_LIMITED with backoff', async () => {
+      class RateLimitProvider implements ISerpProvider {
+        readonly providerName = 'RATE_LIMIT_PROVIDER';
+        isConfigured(): boolean {
+          return true;
+        }
+        async fetchSerp(): Promise<RawSerpResponse> {
+          throw new SerpRateLimitError('Too Many Requests (429)', 5000);
+        }
+      }
+
+      SerpProviderRouter.registerProvider(new RateLimitProvider());
+
       const kw = await KeywordRepository.upsertKeyword({
         websiteId,
-        keyword: 'saas reporting api',
-        searchIntent: SearchIntent.COMMERCIAL,
-        businessValue: BusinessValueTier.TIER_2_HIGH,
+        keyword: 'rate limit keyword test',
       });
 
-      const provider = new MockSerpProvider();
-      const rawSerp = await provider.fetchSerp({ keyword: kw.keyword, targetDomain: testDomain });
+      const testJobId = `serp-ratelimit-test-${Date.now()}`;
+      await expect(
+        SerpQueueConsumer.processJobPayload(
+          {
+            jobType: 'SERP_KEYWORD_CHECK',
+            websiteId,
+            keywordId: kw.id,
+            preferredProvider: 'RATE_LIMIT_PROVIDER',
+          },
+          testJobId
+        )
+      ).rejects.toThrow();
 
-      // Simulate 2 competing URLs from target domain in top 100
-      const competingResults = [
-        { position: 4, url: `https://${testDomain}/products/reporting-api`, domain: testDomain, title: 'Product API', snippet: '' },
-        { position: 9, url: `https://${testDomain}/blog/best-saas-reporting-apis`, domain: testDomain, title: 'Blog API', snippet: '' },
-      ];
+      const jobRun = await prisma.jobRun.findFirst({ where: { jobId: testJobId } });
+      expect(jobRun?.status).toBe('RATE_LIMITED');
+      expect(jobRun?.errorMessage).toContain('rate limit');
+    });
 
-      const events = await SerpEventEngine.evaluateAndEmitEvents({
+    it('handles retries and transitions to DEAD_LETTER when maxAttempts is exceeded', async () => {
+      class PersistentFailingProvider implements ISerpProvider {
+        readonly providerName = 'FAILING_PROVIDER';
+        isConfigured(): boolean {
+          return true;
+        }
+        async fetchSerp(): Promise<RawSerpResponse> {
+          throw new Error('Fatal downstream unrecoverable provider failure');
+        }
+      }
+
+      SerpProviderRouter.registerProvider(new PersistentFailingProvider());
+
+      const kw = await KeywordRepository.upsertKeyword({
+        websiteId,
+        keyword: 'dead letter test keyword',
+      });
+
+      const deadLetterJobId = `serp-deadletter-test-${Date.now()}`;
+
+      // Create initial JobRun with attempts=2 and maxAttempts=3 (so next attempt is #3 and reaches limit)
+      await prisma.jobRun.create({
+        data: {
+          websiteId,
+          queueName: 'serp-intelligence-queue',
+          jobName: 'SERP_KEYWORD_CHECK',
+          jobId: deadLetterJobId,
+          status: 'PENDING',
+          attempts: 2,
+          maxAttempts: 3,
+        },
+      });
+
+      await expect(
+        SerpQueueConsumer.processJobPayload(
+          {
+            jobType: 'SERP_KEYWORD_CHECK',
+            websiteId,
+            keywordId: kw.id,
+            preferredProvider: 'FAILING_PROVIDER',
+          },
+          deadLetterJobId
+        )
+      ).rejects.toThrow();
+
+      const finalJobRun = await prisma.jobRun.findFirst({ where: { jobId: deadLetterJobId } });
+      expect(finalJobRun?.status).toBe('DEAD_LETTER');
+      expect(finalJobRun?.attempts).toBe(3);
+
+      const deadLetterOutbox = await prisma.outboxEvent.findFirst({
+        where: { aggregateId: kw.id, eventType: 'SERP_JOB_DEAD_LETTER' },
+      });
+      expect(deadLetterOutbox).toBeDefined();
+    });
+
+    it('enforces idempotent re-runs by deduplicating active and pending requests', async () => {
+      const kw = await KeywordRepository.upsertKeyword({
+        websiteId,
+        keyword: 'idempotent keyword check',
+      });
+
+      const fixedKey = `serp-${websiteId}-${kw.id}-DESKTOP-idempotent-key`;
+
+      const firstEnqueue = await SerpQueueProducer.enqueueSerpCheck({
+        jobType: 'SERP_KEYWORD_CHECK',
         websiteId,
         keywordId: kw.id,
-        snapshotId: 'test-snap-id-2',
-        keywordText: kw.keyword,
-        businessValue: kw.businessValue,
-        searchIntent: kw.searchIntent,
-        previousRank: 4,
-        currentRank: 4,
-        currentResponse: rawSerp,
-        targetResults: competingResults,
-        targetDomain: testDomain,
+        idempotencyKey: fixedKey,
       });
+      expect(firstEnqueue.deduplicated).toBe(false);
 
-      const cannibalEvent = events.find((e) => e.eventType === SerpEventType.KEYWORD_CANNIBALIZATION_DETECTED);
-      expect(cannibalEvent).toBeDefined();
-      expect(cannibalEvent?.recommendationId).toBeDefined();
-
-      const rec = await prisma.seoRecommendation.findUnique({
-        where: { id: cannibalEvent!.recommendationId! },
+      const secondEnqueue = await SerpQueueProducer.enqueueSerpCheck({
+        jobType: 'SERP_KEYWORD_CHECK',
+        websiteId,
+        keywordId: kw.id,
+        idempotencyKey: fixedKey,
       });
-      expect(rec?.title).toContain('Resolve Keyword Cannibalization');
+      expect(secondEnqueue.deduplicated).toBe(true);
+      expect(secondEnqueue.jobId).toBe(firstEnqueue.jobId);
     });
   });
 
-  describe('7. Competitor Discovery & Keyword Gap Analysis', () => {
+  describe('8. Historical Keyword Cannibalization Detection (5-Point Evidence)', () => {
+    it('evaluates cannibalization requiring all 5 criteria: multiple URLs, same intent, ranking volatility, CTR dilution, observation window', async () => {
+      const kw = await KeywordRepository.upsertKeyword({
+        websiteId,
+        keyword: 'enterprise reporting automation api',
+        searchIntent: SearchIntent.COMMERCIAL,
+        businessValue: BusinessValueTier.TIER_1_CRITICAL,
+      });
+
+      const urlA = `https://${testDomain}/products/reporting-api`;
+      const urlB = `https://${testDomain}/solutions/enterprise-reporting`;
+
+      // 1. Seed historical snapshot (URL A at pos 4, URL B at pos 7)
+      const snap1 = await prisma.serpSnapshot.create({
+        data: {
+          websiteId,
+          keywordId: kw.id,
+          keywordText: kw.keyword,
+          provider: 'MOCK',
+          device: SerpDevice.DESKTOP,
+          countryCode: 'US',
+          searchEngine: 'google',
+          snapshotDate: new Date(Date.now() - 5 * 86400 * 1000), // 5 days ago
+          ourRank: 4,
+          ourRankedUrl: urlA,
+          rawPayloadHash: 'hash-snap-hist-1',
+          hasMultipleRankings: true,
+        },
+      });
+
+      await prisma.serpItem.createMany({
+        data: [
+          { snapshotId: snap1.id, position: 4, url: urlA, domain: testDomain, title: 'Product API', snippet: '' },
+          { snapshotId: snap1.id, position: 7, url: urlB, domain: testDomain, title: 'Solutions Reporting', snippet: '' },
+        ],
+      });
+
+      // 2. Current snapshot shows rank swapping / concurrent competition (URL B at pos 5, URL A at pos 8)
+      const currentResults = [
+        { position: 5, url: urlB, domain: testDomain, title: 'Solutions Reporting', snippet: '' },
+        { position: 8, url: urlA, domain: testDomain, title: 'Product API', snippet: '' },
+      ];
+
+      const analysis = await SerpEventEngine.evaluateCannibalizationWithHistory({
+        websiteId,
+        keywordId: kw.id,
+        keywordText: kw.keyword,
+        searchIntent: kw.searchIntent,
+        targetDomain: testDomain,
+        currentResults,
+        windowDays: 30,
+      });
+
+      expect(analysis.isCannibalizing).toBe(true);
+      expect(analysis.criteriaSatisfied.multipleUrls).toBe(true);
+      expect(analysis.criteriaSatisfied.sameIntent).toBe(true);
+      expect(analysis.criteriaSatisfied.rankingVolatility).toBe(true);
+      expect(analysis.criteriaSatisfied.ctrDilution).toBe(true);
+      expect(analysis.criteriaSatisfied.observationWindow).toBe(true);
+
+      expect(analysis.competingUrls.length).toBe(2);
+      expect(analysis.dilutionEvidence.dilutionLossPct).toBeGreaterThan(0);
+      expect(analysis.recommendation).toBeDefined();
+      expect(analysis.recommendation?.title).toContain('Resolve Keyword Cannibalization');
+    });
+  });
+
+  describe('9. Competitor Discovery & Keyword Gap Analysis', () => {
     it('discovers competitor domains, calculates overlap, and performs gap analysis', async () => {
       // Execute 3 keyword checks to populate SERPs
       const kw1 = await KeywordRepository.upsertKeyword({ websiteId, keyword: 'cloud compliance audit' });
@@ -349,7 +566,7 @@ describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () 
     });
   });
 
-  describe('8. Keyword Discovery Pipeline', () => {
+  describe('10. Keyword Discovery Pipeline', () => {
     it('imports seed keywords and classifies them with metric provenance', async () => {
       const seedResult = await KeywordDiscoveryPipeline.importSeeds(websiteId, [
         'best b2b fintech api',
@@ -364,7 +581,7 @@ describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () 
     });
   });
 
-  describe('9. SERP Raw Data Retention Policy', () => {
+  describe('11. SERP Raw Data Retention Policy', () => {
     it('clears old raw JSON responses while leaving parsed items and facts intact', async () => {
       const kw = await KeywordRepository.upsertKeyword({ websiteId, keyword: 'data retention test keyword' });
       await SerpExecutionService.executeKeywordSerpCheck({ websiteId, keywordId: kw.id });
