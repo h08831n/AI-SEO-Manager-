@@ -1,18 +1,13 @@
 import { prisma } from '../../db/prisma';
 import { ActionStatus } from '@prisma/client';
 import { VerificationCheckResult } from './actionTypes';
-import { CanonicalActionExecutor } from './executors/canonicalActionExecutor';
-import { MetaTagsActionExecutor } from './executors/metaTagsActionExecutor';
-import { StructuredDataActionExecutor } from './executors/structuredDataActionExecutor';
-import { RedirectActionExecutor } from './executors/redirectActionExecutor';
-import { InternalLinkActionExecutor } from './executors/internalLinkActionExecutor';
 import { LearningLoopEngine } from '../decision/learningLoopEngine';
-import { CmsProviderRegistry } from './cms/cmsProviderRegistry';
+import { SyntheticHttpFetcher } from './syntheticHttpFetcher';
 
 export class VerificationEngine {
   /**
    * STAGE 1: Immediate Synthetic HTTP / DOM / Schema Verification (T + 60s).
-   * Verifies that the deployed tag, header, directive, or schema is physically live and matching expected state.
+   * Performs real synthetic HTTP fetch and Cheerio DOM parsing to verify that the deployed tag, header, directive, or schema is physically live.
    */
   public static async runStage1SyntheticVerification(params: {
     actionExecutionId: string;
@@ -25,68 +20,95 @@ export class VerificationEngine {
   }): Promise<VerificationCheckResult> {
     const { actionExecutionId, actionType, targetUrl, expectedState, ruleKey, websiteId, platform } = params;
 
+    const parsedDom = await SyntheticHttpFetcher.fetchAndParse(targetUrl, platform);
+
     let observedData: Record<string, any> = {};
     let passed = false;
     let varianceDetails: string | undefined;
 
     switch (actionType) {
       case 'SET_CANONICAL_URL': {
-        const deployed = CanonicalActionExecutor.getDeployedCanonical(targetUrl, platform);
-        observedData = { canonicalUrl: deployed, httpStatus: 200 };
-        passed = deployed === expectedState.canonicalUrl;
+        observedData = {
+          canonicalUrl: parsedDom.canonicalUrl,
+          httpStatus: parsedDom.httpStatus,
+          title: parsedDom.title,
+        };
+        passed = parsedDom.canonicalUrl === expectedState.canonicalUrl;
         if (!passed) {
-          varianceDetails = `Expected canonical "${expectedState.canonicalUrl}", but observed "${deployed || '<none>'}"`;
+          varianceDetails = `Expected canonical "${expectedState.canonicalUrl}", but observed in parsed DOM "${parsedDom.canonicalUrl || '<none>'}"`;
         }
         break;
       }
 
       case 'SET_META_TAGS': {
-        const meta = MetaTagsActionExecutor.getDeployedMeta(targetUrl, platform);
-        observedData = { ...meta, httpStatus: 200 };
-        const titleMatch = expectedState.title ? meta?.title === expectedState.title : true;
-        const descMatch = expectedState.description ? meta?.description === expectedState.description : true;
-        passed = Boolean(meta && titleMatch && descMatch);
+        observedData = {
+          title: parsedDom.title,
+          description: parsedDom.description,
+          robotsMeta: parsedDom.robotsMeta,
+          httpStatus: parsedDom.httpStatus,
+        };
+        const titleMatch = expectedState.title ? parsedDom.title === expectedState.title : true;
+        const descMatch = expectedState.description ? parsedDom.description === expectedState.description : true;
+        passed = Boolean(titleMatch && descMatch);
         if (!passed) {
-          varianceDetails = `Meta tags mismatch: expected title="${expectedState.title}", observed="${meta?.title}"`;
+          varianceDetails = `Meta tags mismatch: expected title="${expectedState.title}", observed="${parsedDom.title}"`;
         }
         break;
       }
 
       case 'INJECT_STRUCTURED_DATA': {
-        const schemas = StructuredDataActionExecutor.getDeployedSchemas(targetUrl, platform);
-        observedData = { schemasCount: schemas.length, schemas, httpStatus: 200 };
-        passed = schemas.length > 0;
+        observedData = {
+          schemasCount: parsedDom.schemas.length,
+          schemas: parsedDom.schemas,
+          httpStatus: parsedDom.httpStatus,
+        };
+        passed = parsedDom.schemas.length > 0;
         if (!passed) {
-          varianceDetails = 'No structured data schemas found deployed on target URL';
+          varianceDetails = 'No structured data schemas found in parsed DOM LD-JSON blocks';
         }
         break;
       }
 
       case 'CREATE_REDIRECT_RULE': {
-        const redirect = RedirectActionExecutor.getDeployedRedirect(targetUrl, platform);
-        observedData = { ...(redirect || {}), httpStatus: redirect?.statusCode || 301 };
-        passed = Boolean(redirect && redirect.destinationUrl === expectedState.destinationUrl);
+        observedData = {
+          destinationUrl: parsedDom.locationHeader,
+          statusCode: parsedDom.httpStatus,
+          httpStatus: parsedDom.httpStatus,
+        };
+        const destMatch = parsedDom.locationHeader === expectedState.destinationUrl;
+        const statusMatch = expectedState.statusCode ? parsedDom.httpStatus === expectedState.statusCode : true;
+        passed = Boolean(destMatch && statusMatch);
         if (!passed) {
-          varianceDetails = `Redirect mismatch: expected destination "${expectedState.destinationUrl}", observed "${redirect?.destinationUrl}"`;
+          varianceDetails = `Redirect mismatch: expected destination "${expectedState.destinationUrl}", observed "${parsedDom.locationHeader}" (status ${parsedDom.httpStatus})`;
         }
         break;
       }
 
       case 'INJECT_INTERNAL_LINK': {
-        const links = InternalLinkActionExecutor.getDeployedLinks(targetUrl, platform);
-        observedData = { linksCount: links.length, links, httpStatus: 200 };
-        passed = links.length > 0;
+        observedData = {
+          linksCount: parsedDom.links.length,
+          links: parsedDom.links,
+          httpStatus: parsedDom.httpStatus,
+        };
+        passed = parsedDom.links.length > 0;
         break;
       }
 
       case 'CONTENT_REFRESH_ACTION': {
-        observedData = { stage: 'CONTENT_STAGED_VERIFIED', httpStatus: 200 };
+        observedData = {
+          stage: 'CONTENT_STAGED_VERIFIED',
+          httpStatus: parsedDom.httpStatus,
+          title: parsedDom.title,
+        };
         passed = true;
         break;
       }
 
       default:
-        observedData = { defaultCheck: 'PASSED', httpStatus: 200 };
+        observedData = {
+          defaultCheck: 'PASSED',
+          httpStatus: parsedDom.httpStatus,
+        };
         passed = true;
     }
 

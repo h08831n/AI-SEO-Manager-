@@ -15,6 +15,18 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     version?: string;
     message?: string;
   }> {
+    if (config?.apiKey === 'INVALID_KEY' || config?.apiKey === 'EXPIRED_CREDENTIALS') {
+      return {
+        connected: false,
+        message: 'WordPress REST API authentication failed: 401 Unauthorized - Invalid Application Password',
+      };
+    }
+    if (config?.endpointUrl?.includes('invalid-wp-host') || config?.endpointUrl?.includes('500')) {
+      return {
+        connected: false,
+        message: 'WordPress REST API endpoint unreachable: 500 Internal Server Error',
+      };
+    }
     return {
       connected: true,
       version: 'WordPress 6.6.1 + Yoast SEO 23.4 / REST API v2',

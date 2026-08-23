@@ -3,12 +3,10 @@ import { ActionPreStateSnapshot, RollbackExecutionHistory } from '../actionTypes
 import crypto from 'crypto';
 
 export class ActionSnapshotService {
-  // In-memory fallback / cache that synchronizes with database
   private static snapshotCache: Map<string, ActionPreStateSnapshot> = new Map();
-  private static rollbackHistoryCache: Map<string, RollbackExecutionHistory[]> = new Map();
 
   /**
-   * Persists pre-state snapshot durably so rollbacks survive worker restarts.
+   * Persists pre-state snapshot durably to ActionPreStateSnapshot table so rollbacks survive worker restarts.
    */
   public static async savePreStateSnapshot(params: {
     actionExecutionId: string;
@@ -33,6 +31,18 @@ export class ActionSnapshotService {
     };
 
     this.snapshotCache.set(actionExecutionId, snapshot);
+
+    // Persist directly to ActionPreStateSnapshot Prisma model
+    await prisma.actionPreStateSnapshot.create({
+      data: {
+        id: snapshot.id,
+        actionExecutionId,
+        websiteId,
+        checksum,
+        snapshotJson: preStateJson,
+        createdAt: snapshot.createdAt,
+      },
+    });
 
     // Save to ActionExecution beforeEvidenceJson in DB
     await prisma.actionExecution.updateMany({
@@ -65,7 +75,32 @@ export class ActionSnapshotService {
       return cached;
     }
 
-    // 2. Worker Restart Survival: Recover from Prisma DB ActionExecution
+    // 2. Query persistent ActionPreStateSnapshot model
+    const persistentSnap = await prisma.actionPreStateSnapshot.findFirst({
+      where: { actionExecutionId },
+    });
+
+    if (persistentSnap) {
+      const execution = await prisma.actionExecution.findUnique({
+        where: { id: actionExecutionId },
+      });
+
+      const recovered: ActionPreStateSnapshot = {
+        id: persistentSnap.id,
+        actionExecutionId: persistentSnap.actionExecutionId,
+        websiteId: persistentSnap.websiteId,
+        actionType: execution?.actionType || 'UNKNOWN_ACTION',
+        targetUrl: execution?.targetUrl || '',
+        preStateJson: persistentSnap.snapshotJson,
+        checksum: persistentSnap.checksum,
+        createdAt: persistentSnap.createdAt,
+      };
+
+      this.snapshotCache.set(actionExecutionId, recovered);
+      return recovered;
+    }
+
+    // 3. Fallback recovery from ActionExecution beforeEvidenceJson
     const execution = await prisma.actionExecution.findUnique({
       where: { id: actionExecutionId },
     });
@@ -103,22 +138,33 @@ export class ActionSnapshotService {
     durationMs?: number;
   }): Promise<RollbackExecutionHistory> {
     const { actionExecutionId, websiteId, rolledBackByUserId, reason, preStateRestored, success, durationMs } = params;
+    const restoredStateJson = JSON.stringify(preStateRestored);
+    const actorId = rolledBackByUserId || 'SYSTEM_ROLLBACK_ENGINE';
 
     const historyEntry: RollbackExecutionHistory = {
       id: `rb-hist-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       actionExecutionId,
       websiteId,
-      rolledBackByUserId,
+      rolledBackByUserId: actorId,
       reason,
-      preStateRestoredJson: JSON.stringify(preStateRestored),
+      preStateRestoredJson: restoredStateJson,
       success,
       rolledBackAt: new Date(),
       durationMs: durationMs || 0,
     };
 
-    const list = this.rollbackHistoryCache.get(websiteId) || [];
-    list.push(historyEntry);
-    this.rollbackHistoryCache.set(websiteId, list);
+    // Persist directly to RollbackExecutionHistory Prisma model
+    await prisma.rollbackExecutionHistory.create({
+      data: {
+        id: historyEntry.id,
+        actionExecutionId,
+        reason,
+        restoredStateJson,
+        success,
+        actorId,
+        createdAt: historyEntry.rolledBackAt,
+      },
+    });
 
     // Persist to Outbox Event
     await prisma.outboxEvent.create({
@@ -134,10 +180,25 @@ export class ActionSnapshotService {
   }
 
   /**
-   * Retrieves rollback execution history for a website.
+   * Retrieves rollback execution history for a website from persistent database storage.
    */
   public static async getRollbackHistory(websiteId: string): Promise<RollbackExecutionHistory[]> {
-    return this.rollbackHistoryCache.get(websiteId) || [];
+    const histories = await prisma.rollbackExecutionHistory.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Format as RollbackExecutionHistory domain objects
+    return histories.map((h) => ({
+      id: h.id,
+      actionExecutionId: h.actionExecutionId,
+      websiteId,
+      rolledBackByUserId: h.actorId,
+      reason: h.reason,
+      preStateRestoredJson: h.restoredStateJson,
+      success: h.success,
+      rolledBackAt: h.createdAt,
+      durationMs: 0,
+    }));
   }
 
   /**

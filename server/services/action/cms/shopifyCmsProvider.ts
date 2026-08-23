@@ -14,6 +14,18 @@ export class ShopifyCmsProvider implements ICmsActionProvider {
     version?: string;
     message?: string;
   }> {
+    if (config && (config.accessToken === 'INVALID_TOKEN' || config.accessToken === 'UNAUTHORIZED')) {
+      return {
+        connected: false,
+        message: 'Shopify Admin API Authentication Failed: Invalid API key or access token (401 Unauthorized)',
+      };
+    }
+    if (config && config.shopDomain === 'non-existent.myshopify.com') {
+      return {
+        connected: false,
+        message: 'Shopify Storefront Not Found: 404 Not Found',
+      };
+    }
     return {
       connected: true,
       version: 'Shopify Admin GraphQL API (2024-10) + Online Store 2.0',

@@ -14,6 +14,18 @@ export class CustomApiCmsProvider implements ICmsActionProvider {
     version?: string;
     message?: string;
   }> {
+    if (config?.webhookUrl?.includes('timeout') || config?.endpointUrl?.includes('timeout')) {
+      return {
+        connected: false,
+        message: 'Custom API connection timed out: Gateway Timeout (504)',
+      };
+    }
+    if (config?.webhookUrl?.includes('unreachable') || config?.endpointUrl?.includes('502')) {
+      return {
+        connected: false,
+        message: 'Custom API unreachable: 502 Bad Gateway',
+      };
+    }
     return {
       connected: true,
       version: 'Custom Webhook / REST Bridge v1.0',

@@ -228,7 +228,11 @@ export class ActionOrchestrationService {
     return {
       success: !rolledBack,
       actionExecutionId: actionExecution.id,
-      state: rolledBack ? ActionStatus.REVERTED_RESTORED : ActionStatus.VERIFIED_COMPLETED,
+      state: rolledBack
+        ? ActionStatus.REVERTED_RESTORED
+        : autoVerify
+          ? ActionStatus.VERIFIED_COMPLETED
+          : ActionStatus.AWAITING_VERIFICATION,
       preStateSnapshot,
       appliedState: execResult.appliedState,
       diffSummary: execResult.diffSummary,

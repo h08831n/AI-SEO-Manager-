@@ -187,6 +187,8 @@ model Website {
   serpEvents       SerpSnapshotEvent[]
   competitorDomains CompetitorDomain[]
   competitorFacts  CompetitorDailyFact[]
+  actionPreStateSnapshots ActionPreStateSnapshot[]
+  actionApprovalRequests ActionApprovalRequest[]
   auditLogs        AuditLog[]
   jobRuns          JobRun[]
 
@@ -884,6 +886,8 @@ model ActionExecution {
   task                SeoTask?             @relation(fields: [taskId], references: [id], onDelete: SetNull)
   recommendation      SeoRecommendation?   @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
   verifications       ActionVerification[]
+  preStateSnapshots   ActionPreStateSnapshot[]
+  rollbackHistories   RollbackExecutionHistory[]
 
   @@index([websiteId, state])
   @@index([idempotencyKey])
@@ -905,6 +909,77 @@ model ActionVerification {
 
   @@index([actionExecutionId, status])
   @@map("action_verifications")
+}
+
+model ActionPreStateSnapshot {
+  id                String          @id @default(uuid())
+  actionExecutionId String
+  websiteId         String
+  checksum          String
+  snapshotJson      String
+  createdAt         DateTime        @default(now())
+
+  actionExecution   ActionExecution @relation(fields: [actionExecutionId], references: [id], onDelete: Cascade)
+  website           Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@index([actionExecutionId])
+  @@index([websiteId])
+  @@map("action_pre_state_snapshots")
+}
+
+model RollbackExecutionHistory {
+  id                String          @id @default(uuid())
+  actionExecutionId String
+  reason            String
+  restoredStateJson String
+  success           Boolean
+  actorId           String
+  createdAt         DateTime        @default(now())
+
+  actionExecution   ActionExecution @relation(fields: [actionExecutionId], references: [id], onDelete: Cascade)
+
+  @@index([actionExecutionId])
+  @@map("rollback_execution_histories")
+}
+
+model ActionApprovalRequest {
+  id                String                      @id @default(uuid())
+  websiteId         String
+  actionType        String
+  targetUrl         String
+  ruleKey           String?
+  payloadJson       String
+  opportunityScore  Float                       @default(0.0)
+  riskLevel         String                      @default("LEVEL_1_SAFE_AUTOMATION")
+  state             String                      @default("PROPOSED")
+  proposedBy        String                      @default("DECISION_ENGINE")
+  approvedBy        String?
+  approvalNotes     String?
+  rejectionReason   String?
+  actionExecutionId String?
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+
+  website           Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  transitionLogs    ActionStateTransitionLog[]
+
+  @@index([websiteId, state])
+  @@map("action_approval_requests")
+}
+
+model ActionStateTransitionLog {
+  id                String                @id @default(uuid())
+  approvalRequestId String
+  fromState         String
+  toState           String
+  actorId           String
+  reason            String?
+  timestamp         DateTime              @default(now())
+
+  approvalRequest   ActionApprovalRequest @relation(fields: [approvalRequestId], references: [id], onDelete: Cascade)
+
+  @@index([approvalRequestId])
+  @@map("action_state_transition_logs")
 }
 
 // ----------------------------------------------------

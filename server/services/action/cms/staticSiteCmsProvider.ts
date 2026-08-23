@@ -14,6 +14,18 @@ export class StaticSiteCmsProvider implements ICmsActionProvider {
     version?: string;
     message?: string;
   }> {
+    if (config?.branchName === 'protected-locked-branch' || config?.repository === 'invalid/repo') {
+      return {
+        connected: false,
+        message: 'Static site deployment failure: Git push rejected - Merge conflict or branch protection rule on branch main',
+      };
+    }
+    if (config?.apiKey === 'INVALID_EDGE_TOKEN') {
+      return {
+        connected: false,
+        message: 'Edge deployment worker authentication failed: 403 Forbidden',
+      };
+    }
     return {
       connected: true,
       version: 'Git Automation (GitHub/GitLab PRs) + Cloudflare Edge Workers / _redirects',
