@@ -139,10 +139,10 @@ router.post('/:id/verify', async (req: Request, res: Response) => {
 // --- Action Approval Center Endpoints ---
 
 // GET /api/actions/approval-center/queue
-router.get('/approval-center/queue', (req: Request, res: Response) => {
+router.get('/approval-center/queue', async (req: Request, res: Response) => {
   const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const state = req.query.state as ApprovalState | undefined;
-  const items = ActionApprovalCenter.getApprovalQueue(websiteId, state);
+  const items = await ActionApprovalCenter.getApprovalQueue(websiteId, state);
   return res.json({ items });
 });
 
@@ -197,8 +197,8 @@ router.post('/approval-center/:id/reject', async (req: Request, res: Response) =
 });
 
 // GET /api/actions/approval-center/:id/logs
-router.get('/approval-center/:id/logs', (req: Request, res: Response) => {
-  const logs = ActionApprovalCenter.getTransitionLogs(req.params.id);
+router.get('/approval-center/:id/logs', async (req: Request, res: Response) => {
+  const logs = await ActionApprovalCenter.getTransitionLogs(req.params.id);
   return res.json({ logs });
 });
 

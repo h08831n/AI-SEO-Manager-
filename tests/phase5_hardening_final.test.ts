@@ -315,7 +315,7 @@ describe('Phase 5 Final Hardening Acceptance Tests', () => {
       expect(rolledBack.state).toBe('ROLLED_BACK');
 
       // Verify full transition logs audit trail
-      const logs = ActionApprovalCenter.getTransitionLogs(proposed.id);
+      const logs = await ActionApprovalCenter.getTransitionLogs(proposed.id);
       expect(logs.length).toBe(6);
     });
 

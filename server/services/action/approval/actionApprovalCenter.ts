@@ -2,9 +2,6 @@ import { ApprovalState, ProposedActionItem, StateTransitionLog } from './approva
 import { prisma } from '../../../db/prisma';
 
 export class ActionApprovalCenter {
-  private static actionStore: Map<string, ProposedActionItem> = new Map();
-  private static transitionLogs: Map<string, StateTransitionLog[]> = new Map();
-
   // Valid State Machine Transitions
   private static ALLOWED_TRANSITIONS: Record<ApprovalState, ApprovalState[]> = {
     PROPOSED: ['APPROVED', 'REJECTED'],
@@ -16,6 +13,139 @@ export class ActionApprovalCenter {
     VERIFIED: ['ROLLED_BACK'], // 1-click rollback after verification
     ROLLED_BACK: ['PROPOSED'],
   };
+
+  /**
+   * Helper to deserialize Prisma ActionApprovalRequest record to ProposedActionItem.
+   */
+  private static mapDbRecordToItem(rec: any): ProposedActionItem {
+    let payload = {};
+    try {
+      payload = typeof rec.payloadJson === 'string' ? JSON.parse(rec.payloadJson) : rec.payloadJson || {};
+    } catch (e) {
+      payload = {};
+    }
+
+    return {
+      id: rec.id,
+      websiteId: rec.websiteId,
+      actionType: rec.actionType,
+      targetUrl: rec.targetUrl,
+      ruleKey: rec.ruleKey || undefined,
+      payload,
+      opportunityScore: rec.opportunityScore,
+      riskLevel: rec.riskLevel as any,
+      state: rec.state as ApprovalState,
+      proposedBy: rec.proposedBy,
+      approvedBy: rec.approvedBy || undefined,
+      approvalNotes: rec.approvalNotes || undefined,
+      rejectionReason: rec.rejectionReason || undefined,
+      executionId: rec.actionExecutionId || undefined,
+      proposedAt: rec.createdAt,
+      updatedAt: rec.updatedAt,
+    };
+  }
+
+  /**
+   * Validates state transition according to the formal state machine.
+   */
+  private static validateTransition(currentState: ApprovalState, targetState: ApprovalState): void {
+    const allowed = this.ALLOWED_TRANSITIONS[currentState] || [];
+    if (!allowed.includes(targetState)) {
+      throw new Error(
+        `Invalid Action Approval state transition: cannot transition from '${currentState}' to '${targetState}'`
+      );
+    }
+  }
+
+  /**
+   * Atomic transactional state transition helper.
+   * Guarantees that across multiple API instances and concurrent executions,
+   * only ONE transition can succeed for a given state.
+   */
+  private static async executeAtomicTransition(params: {
+    actionId: string;
+    targetState: ApprovalState;
+    actorId: string;
+    reasonOrNotes?: string;
+    updateFields?: {
+      approvedBy?: string;
+      approvalNotes?: string;
+      rejectionReason?: string;
+      actionExecutionId?: string;
+    };
+  }): Promise<ProposedActionItem> {
+    const { actionId, targetState, actorId, reasonOrNotes, updateFields = {} } = params;
+
+    return await prisma.$transaction(async (tx) => {
+      const existing = await tx.actionApprovalRequest.findUnique({
+        where: { id: actionId },
+      });
+
+      if (!existing) {
+        throw new Error(`Approval item with ID '${actionId}' not found`);
+      }
+
+      const currentState = existing.state as ApprovalState;
+      this.validateTransition(currentState, targetState);
+
+      const now = new Date();
+      // Atomic conditional update on current state
+      const updateResult = await tx.actionApprovalRequest.updateMany({
+        where: {
+          id: actionId,
+          state: currentState,
+        },
+        data: {
+          state: targetState,
+          updatedAt: now,
+          ...updateFields,
+        },
+      });
+
+      if (updateResult.count === 0) {
+        const fresh = await tx.actionApprovalRequest.findUnique({ where: { id: actionId } });
+        throw new Error(
+          `Concurrent transition conflict: action '${actionId}' is in state '${fresh?.state}', cannot transition from '${currentState}' to '${targetState}'`
+        );
+      }
+
+      const logId = `trans-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+      // Persist immutable audit log to ActionStateTransitionLog Prisma table
+      await tx.actionStateTransitionLog.create({
+        data: {
+          id: logId,
+          approvalRequestId: actionId,
+          fromState: currentState,
+          toState: targetState,
+          actorId,
+          reason: reasonOrNotes,
+          timestamp: now,
+        },
+      });
+
+      // Persist outbox event for event-driven integration
+      await tx.outboxEvent.create({
+        data: {
+          aggregateType: 'APPROVAL_CENTER',
+          aggregateId: actionId,
+          eventType: 'ACTION_STATE_TRANSITIONED',
+          payloadJson: JSON.stringify({
+            id: logId,
+            actionId,
+            previousState: currentState,
+            newState: targetState,
+            triggeredByUserId: actorId,
+            reason: reasonOrNotes,
+            timestamp: now,
+          }),
+        },
+      });
+
+      const updatedRecord = await tx.actionApprovalRequest.findUnique({ where: { id: actionId } });
+      return this.mapDbRecordToItem(updatedRecord!);
+    });
+  }
 
   /**
    * Proposes a new action item into the Action Approval Center and persists to DB.
@@ -43,6 +173,7 @@ export class ActionApprovalCenter {
 
     const actionId = `prop-act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const payloadJson = JSON.stringify(payload);
+    const now = new Date();
 
     // Persist to ActionApprovalRequest table
     const dbRecord = await prisma.actionApprovalRequest.create({
@@ -57,27 +188,12 @@ export class ActionApprovalCenter {
         riskLevel,
         state: 'PROPOSED',
         proposedBy,
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: now,
+        updatedAt: now,
       },
     });
 
-    const actionItem: ProposedActionItem = {
-      id: dbRecord.id,
-      websiteId: dbRecord.websiteId,
-      actionType: dbRecord.actionType,
-      targetUrl: dbRecord.targetUrl,
-      ruleKey: dbRecord.ruleKey || undefined,
-      payload,
-      opportunityScore: dbRecord.opportunityScore,
-      riskLevel: dbRecord.riskLevel as any,
-      state: dbRecord.state as ApprovalState,
-      proposedBy: dbRecord.proposedBy,
-      proposedAt: dbRecord.createdAt,
-      updatedAt: dbRecord.updatedAt,
-    };
-
-    this.actionStore.set(actionItem.id, actionItem);
+    const actionItem = this.mapDbRecordToItem(dbRecord);
 
     // Persist outbox event
     await prisma.outboxEvent.create({
@@ -93,7 +209,7 @@ export class ActionApprovalCenter {
   }
 
   /**
-   * Approves a proposed action.
+   * Approves a proposed action atomically in DB.
    */
   public static async approveAction(params: {
     actionId: string;
@@ -101,34 +217,20 @@ export class ActionApprovalCenter {
     notes?: string;
   }): Promise<ProposedActionItem> {
     const { actionId, userId, notes } = params;
-    const action = await this.getActionOrThrow(actionId);
-
-    this.validateTransition(action.state, 'APPROVED');
-
-    const prevState = action.state;
-    action.state = 'APPROVED';
-    action.approvedBy = userId;
-    action.approvalNotes = notes;
-    action.updatedAt = new Date();
-
-    // Persist state change to database
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'APPROVED',
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'APPROVED',
+      actorId: userId,
+      reasonOrNotes: notes,
+      updateFields: {
         approvedBy: userId,
         approvalNotes: notes,
-        updatedAt: action.updatedAt,
       },
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'APPROVED', userId, notes);
-    return action;
   }
 
   /**
-   * Rejects a proposed or approved action.
+   * Rejects a proposed, approved, or queued action atomically in DB.
    */
   public static async rejectAction(params: {
     actionId: string;
@@ -136,54 +238,26 @@ export class ActionApprovalCenter {
     reason: string;
   }): Promise<ProposedActionItem> {
     const { actionId, userId, reason } = params;
-    const action = await this.getActionOrThrow(actionId);
-
-    this.validateTransition(action.state, 'REJECTED');
-
-    const prevState = action.state;
-    action.state = 'REJECTED';
-    action.rejectedBy = userId;
-    action.rejectionReason = reason;
-    action.updatedAt = new Date();
-
-    // Persist state change to database
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'REJECTED',
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'REJECTED',
+      actorId: userId,
+      reasonOrNotes: reason,
+      updateFields: {
         rejectionReason: reason,
-        updatedAt: action.updatedAt,
       },
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'REJECTED', userId, reason);
-    return action;
   }
 
   /**
    * Transitions action to QUEUED state for execution dispatcher.
    */
   public static async queueAction(actionId: string, userId: string = 'SYSTEM'): Promise<ProposedActionItem> {
-    const action = await this.getActionOrThrow(actionId);
-    this.validateTransition(action.state, 'QUEUED');
-
-    const prevState = action.state;
-    action.state = 'QUEUED';
-    action.updatedAt = new Date();
-
-    // Persist state change to database
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'QUEUED',
-        updatedAt: action.updatedAt,
-      },
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'QUEUED',
+      actorId: userId,
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'QUEUED', userId);
-    return action;
   }
 
   /**
@@ -194,27 +268,14 @@ export class ActionApprovalCenter {
     executionId: string,
     userId: string = 'WORKER'
   ): Promise<ProposedActionItem> {
-    const action = await this.getActionOrThrow(actionId);
-    this.validateTransition(action.state, 'EXECUTING');
-
-    const prevState = action.state;
-    action.state = 'EXECUTING';
-    action.executionId = executionId;
-    action.updatedAt = new Date();
-
-    // Persist state change to database
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'EXECUTING',
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'EXECUTING',
+      actorId: userId,
+      updateFields: {
         actionExecutionId: executionId,
-        updatedAt: action.updatedAt,
       },
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'EXECUTING', userId);
-    return action;
   }
 
   /**
@@ -225,49 +286,24 @@ export class ActionApprovalCenter {
     stageName: string = 'STAGE_1_SYNTHETIC_DOM',
     userId: string = 'VERIFIER'
   ): Promise<ProposedActionItem> {
-    const action = await this.getActionOrThrow(actionId);
-    this.validateTransition(action.state, 'VERIFYING');
-
-    const prevState = action.state;
-    action.state = 'VERIFYING';
-    action.verificationStage = stageName;
-    action.updatedAt = new Date();
-
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'VERIFYING',
-        updatedAt: action.updatedAt,
-      },
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'VERIFYING',
+      actorId: userId,
+      reasonOrNotes: `Stage: ${stageName}`,
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'VERIFYING', userId, `Stage: ${stageName}`);
-    return action;
   }
 
   /**
    * Transitions action to VERIFIED state.
    */
   public static async markVerified(actionId: string, userId: string = 'VERIFIER'): Promise<ProposedActionItem> {
-    const action = await this.getActionOrThrow(actionId);
-    this.validateTransition(action.state, 'VERIFIED');
-
-    const prevState = action.state;
-    action.state = 'VERIFIED';
-    action.updatedAt = new Date();
-
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'VERIFIED',
-        updatedAt: action.updatedAt,
-      },
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'VERIFIED',
+      actorId: userId,
+      reasonOrNotes: 'All verification stages satisfied',
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'VERIFIED', userId, 'All verification stages satisfied');
-    return action;
   }
 
   /**
@@ -278,45 +314,31 @@ export class ActionApprovalCenter {
     reason: string,
     userId: string = 'ROLLBACK_WORKER'
   ): Promise<ProposedActionItem> {
-    const action = await this.getActionOrThrow(actionId);
-    this.validateTransition(action.state, 'ROLLED_BACK');
-
-    const prevState = action.state;
-    action.state = 'ROLLED_BACK';
-    action.updatedAt = new Date();
-
-    await prisma.actionApprovalRequest.update({
-      where: { id: actionId },
-      data: {
-        state: 'ROLLED_BACK',
-        updatedAt: action.updatedAt,
-      },
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'ROLLED_BACK',
+      actorId: userId,
+      reasonOrNotes: reason,
     });
-
-    this.actionStore.set(actionId, action);
-    await this.logTransition(actionId, prevState, 'ROLLED_BACK', userId, reason);
-    return action;
   }
 
   /**
-   * Retrieves all action approval items for a website, optionally filtered by state.
+   * Retrieves all action approval items for a website from Prisma DB.
    */
-  public static getApprovalQueue(websiteId: string, stateFilter?: ApprovalState): ProposedActionItem[] {
-    const items: ProposedActionItem[] = [];
-    for (const item of this.actionStore.values()) {
-      if (item.websiteId === websiteId) {
-        if (!stateFilter || item.state === stateFilter) {
-          items.push(item);
-        }
-      }
-    }
-    return items.sort((a, b) => b.opportunityScore - a.opportunityScore);
+  public static async getApprovalQueue(
+    websiteId: string,
+    stateFilter?: ApprovalState
+  ): Promise<ProposedActionItem[]> {
+    return await this.getApprovalQueueAsync(websiteId, stateFilter);
   }
 
   /**
    * Async database-backed retrieval for approval queue.
    */
-  public static async getApprovalQueueAsync(websiteId: string, stateFilter?: ApprovalState): Promise<ProposedActionItem[]> {
+  public static async getApprovalQueueAsync(
+    websiteId: string,
+    stateFilter?: ApprovalState
+  ): Promise<ProposedActionItem[]> {
     const where: any = { websiteId };
     if (stateFilter) {
       where.state = stateFilter;
@@ -327,72 +349,37 @@ export class ActionApprovalCenter {
       orderBy: { opportunityScore: 'desc' },
     });
 
-    return records.map((rec) => {
-      let payload = {};
-      try {
-        payload = JSON.parse(rec.payloadJson);
-      } catch (e) {}
-
-      return {
-        id: rec.id,
-        websiteId: rec.websiteId,
-        actionType: rec.actionType,
-        targetUrl: rec.targetUrl,
-        ruleKey: rec.ruleKey || undefined,
-        payload,
-        opportunityScore: rec.opportunityScore,
-        riskLevel: rec.riskLevel as any,
-        state: rec.state as ApprovalState,
-        proposedBy: rec.proposedBy,
-        approvedBy: rec.approvedBy || undefined,
-        approvalNotes: rec.approvalNotes || undefined,
-        rejectionReason: rec.rejectionReason || undefined,
-        executionId: rec.actionExecutionId || undefined,
-        proposedAt: rec.createdAt,
-        updatedAt: rec.updatedAt,
-      };
-    });
+    return records.map((rec) => this.mapDbRecordToItem(rec));
   }
 
-  public static getActionById(actionId: string): ProposedActionItem | undefined {
-    return this.actionStore.get(actionId);
+  /**
+   * Retrieves an action item by ID from Prisma DB.
+   */
+  public static async getActionById(actionId: string): Promise<ProposedActionItem | null> {
+    return await this.getActionByIdAsync(actionId);
   }
 
+  /**
+   * Async database-backed retrieval for a single action item.
+   */
   public static async getActionByIdAsync(actionId: string): Promise<ProposedActionItem | null> {
     const rec = await prisma.actionApprovalRequest.findUnique({
       where: { id: actionId },
     });
     if (!rec) return null;
-
-    let payload = {};
-    try {
-      payload = JSON.parse(rec.payloadJson);
-    } catch (e) {}
-
-    return {
-      id: rec.id,
-      websiteId: rec.websiteId,
-      actionType: rec.actionType,
-      targetUrl: rec.targetUrl,
-      ruleKey: rec.ruleKey || undefined,
-      payload,
-      opportunityScore: rec.opportunityScore,
-      riskLevel: rec.riskLevel as any,
-      state: rec.state as ApprovalState,
-      proposedBy: rec.proposedBy,
-      approvedBy: rec.approvedBy || undefined,
-      approvalNotes: rec.approvalNotes || undefined,
-      rejectionReason: rec.rejectionReason || undefined,
-      executionId: rec.actionExecutionId || undefined,
-      proposedAt: rec.createdAt,
-      updatedAt: rec.updatedAt,
-    };
+    return this.mapDbRecordToItem(rec);
   }
 
-  public static getTransitionLogs(actionId: string): StateTransitionLog[] {
-    return this.transitionLogs.get(actionId) || [];
+  /**
+   * Retrieves all transition logs for an action item from Prisma DB.
+   */
+  public static async getTransitionLogs(actionId: string): Promise<StateTransitionLog[]> {
+    return await this.getTransitionLogsAsync(actionId);
   }
 
+  /**
+   * Async database-backed retrieval for transition logs.
+   */
   public static async getTransitionLogsAsync(actionId: string): Promise<StateTransitionLog[]> {
     const logs = await prisma.actionStateTransitionLog.findMany({
       where: { approvalRequestId: actionId },
@@ -408,76 +395,5 @@ export class ActionApprovalCenter {
       reason: l.reason || undefined,
       timestamp: l.timestamp,
     }));
-  }
-
-  private static async getActionOrThrow(actionId: string): Promise<ProposedActionItem> {
-    let action = this.actionStore.get(actionId);
-    if (!action) {
-      const fromDb = await this.getActionByIdAsync(actionId);
-      if (fromDb) {
-        action = fromDb;
-        this.actionStore.set(actionId, fromDb);
-      }
-    }
-    if (!action) {
-      throw new Error(`Approval item with ID '${actionId}' not found`);
-    }
-    return action;
-  }
-
-  private static validateTransition(currentState: ApprovalState, targetState: ApprovalState): void {
-    const allowed = this.ALLOWED_TRANSITIONS[currentState] || [];
-    if (!allowed.includes(targetState)) {
-      throw new Error(
-        `Invalid Action Approval state transition: cannot transition from '${currentState}' to '${targetState}'`
-      );
-    }
-  }
-
-  private static async logTransition(
-    actionId: string,
-    previousState: ApprovalState,
-    newState: ApprovalState,
-    triggeredByUserId: string,
-    reason?: string
-  ): Promise<void> {
-    const logId = `trans-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-    const now = new Date();
-
-    // Persist to ActionStateTransitionLog Prisma model
-    await prisma.actionStateTransitionLog.create({
-      data: {
-        id: logId,
-        approvalRequestId: actionId,
-        fromState: previousState,
-        toState: newState,
-        actorId: triggeredByUserId,
-        reason,
-        timestamp: now,
-      },
-    });
-
-    const log: StateTransitionLog = {
-      id: logId,
-      actionId,
-      previousState,
-      newState,
-      triggeredByUserId,
-      reason,
-      timestamp: now,
-    };
-
-    const logs = this.transitionLogs.get(actionId) || [];
-    logs.push(log);
-    this.transitionLogs.set(actionId, logs);
-
-    await prisma.outboxEvent.create({
-      data: {
-        aggregateType: 'APPROVAL_CENTER',
-        aggregateId: actionId,
-        eventType: 'ACTION_STATE_TRANSITIONED',
-        payloadJson: JSON.stringify(log),
-      },
-    });
   }
 }
