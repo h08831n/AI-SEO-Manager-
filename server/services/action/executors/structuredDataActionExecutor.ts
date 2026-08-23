@@ -1,5 +1,6 @@
 import { IActionExecutor } from './actionExecutorInterface';
 import { ActionType, ActionTarget, ValidationResult, ExecutionResult, RollbackResult } from '../actionTypes';
+import { CmsProviderRegistry } from '../cms/cmsProviderRegistry';
 
 export interface StructuredDataPayload {
   targetUrl: string;
@@ -12,8 +13,6 @@ export interface StructuredDataPreState {
   previousSchemas: Record<string, any>[];
   capturedAt: string;
 }
-
-const liveSchemaRegistry: Map<string, Record<string, any>[]> = new Map();
 
 export class StructuredDataActionExecutor implements IActionExecutor<StructuredDataPayload, StructuredDataPreState> {
   readonly actionType: ActionType = 'INJECT_STRUCTURED_DATA';
@@ -29,7 +28,8 @@ export class StructuredDataActionExecutor implements IActionExecutor<StructuredD
   }
 
   async capturePreState(target: ActionTarget): Promise<StructuredDataPreState> {
-    const existing = liveSchemaRegistry.get(target.targetUrl) || [];
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const existing = await cms.getStructuredData(target.targetUrl);
     return {
       targetUrl: target.targetUrl,
       previousSchemas: JSON.parse(JSON.stringify(existing)),
@@ -42,34 +42,35 @@ export class StructuredDataActionExecutor implements IActionExecutor<StructuredD
     payload: StructuredDataPayload,
     preState: StructuredDataPreState
   ): Promise<ExecutionResult> {
-    const schemas = liveSchemaRegistry.get(target.targetUrl) || [];
-    schemas.push(payload.schemaJsonLd);
-    liveSchemaRegistry.set(target.targetUrl, schemas);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.injectStructuredData(target.targetUrl, payload.schemaJsonLd);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `exec-schema-${Date.now()}`,
       appliedState: { injectedSchema: payload.schemaJsonLd },
       preStateSnapshot: preState,
       executedAt: new Date(),
-      message: `Successfully injected ${payload.schemaType} structured data`,
-      diffSummary: `Injected schema @type: ${payload.schemaJsonLd['@type']}`,
+      message: cmsRes.message || `Successfully injected ${payload.schemaType} structured data`,
+      diffSummary: `Injected schema @type: ${payload.schemaJsonLd['@type']} [${cms.platform}]`,
     };
   }
 
   async rollback(target: ActionTarget, preState: StructuredDataPreState): Promise<RollbackResult> {
-    liveSchemaRegistry.set(target.targetUrl, preState.previousSchemas);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.revertStructuredData(target.targetUrl, preState.previousSchemas);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `rollback-schema-${Date.now()}`,
       restoredState: preState.previousSchemas,
       rolledBackAt: new Date(),
-      message: 'Successfully removed injected schema and restored previous state',
+      message: cmsRes.message || 'Successfully removed injected schema and restored previous state',
     };
   }
 
-  public static getDeployedSchemas(url: string): Record<string, any>[] {
-    return liveSchemaRegistry.get(url) || [];
+  public static getDeployedSchemas(url: string, platform?: string): Record<string, any>[] {
+    const cms = CmsProviderRegistry.getProvider(platform);
+    return (cms as any).deployedSchemas?.get(url) || [];
   }
 }

@@ -1,5 +1,6 @@
 import { IActionExecutor } from './actionExecutorInterface';
 import { ActionType, ActionTarget, ValidationResult, ExecutionResult, RollbackResult } from '../actionTypes';
+import { CmsProviderRegistry } from '../cms/cmsProviderRegistry';
 
 export interface CanonicalPayload {
   targetUrl: string;
@@ -11,9 +12,6 @@ export interface CanonicalPreState {
   previousCanonicalUrl: string | null;
   capturedAt: string;
 }
-
-// In-memory deployed state registry for simulation/sandboxing
-const liveCanonicalRegistry: Map<string, string> = new Map();
 
 export class CanonicalActionExecutor implements IActionExecutor<CanonicalPayload, CanonicalPreState> {
   readonly actionType: ActionType = 'SET_CANONICAL_URL';
@@ -31,7 +29,8 @@ export class CanonicalActionExecutor implements IActionExecutor<CanonicalPayload
   }
 
   async capturePreState(target: ActionTarget): Promise<CanonicalPreState> {
-    const existing = liveCanonicalRegistry.get(target.targetUrl) || null;
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const existing = await cms.getCanonicalUrl(target.targetUrl);
     return {
       targetUrl: target.targetUrl,
       previousCanonicalUrl: existing,
@@ -44,36 +43,36 @@ export class CanonicalActionExecutor implements IActionExecutor<CanonicalPayload
     payload: CanonicalPayload,
     preState: CanonicalPreState
   ): Promise<ExecutionResult> {
-    liveCanonicalRegistry.set(target.targetUrl, payload.canonicalUrl);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.setCanonicalUrl(target.targetUrl, payload.canonicalUrl);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `exec-canon-${Date.now()}`,
       appliedState: { canonicalUrl: payload.canonicalUrl },
       preStateSnapshot: preState,
       executedAt: new Date(),
-      message: `Successfully deployed canonical tag pointing to ${payload.canonicalUrl}`,
-      diffSummary: `Canonical: ${preState.previousCanonicalUrl || '<none>'} -> ${payload.canonicalUrl}`,
+      message: cmsRes.message || `Successfully deployed canonical tag pointing to ${payload.canonicalUrl}`,
+      diffSummary: `Canonical: ${preState.previousCanonicalUrl || '<none>'} -> ${payload.canonicalUrl} [${cms.platform}]`,
     };
   }
 
   async rollback(target: ActionTarget, preState: CanonicalPreState): Promise<RollbackResult> {
-    if (preState.previousCanonicalUrl) {
-      liveCanonicalRegistry.set(target.targetUrl, preState.previousCanonicalUrl);
-    } else {
-      liveCanonicalRegistry.delete(target.targetUrl);
-    }
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.revertCanonicalUrl(target.targetUrl, preState.previousCanonicalUrl);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `rollback-canon-${Date.now()}`,
       restoredState: { canonicalUrl: preState.previousCanonicalUrl },
       rolledBackAt: new Date(),
-      message: `Successfully reverted canonical tag to ${preState.previousCanonicalUrl || '<none>'}`,
+      message: cmsRes.message || `Successfully reverted canonical tag to ${preState.previousCanonicalUrl || '<none>'}`,
     };
   }
 
-  public static getDeployedCanonical(url: string): string | undefined {
-    return liveCanonicalRegistry.get(url);
+  public static getDeployedCanonical(url: string, platform?: string): string | undefined {
+    const cms = CmsProviderRegistry.getProvider(platform);
+    // Since getCanonicalUrl is async, we read from memory map directly or sync bridge
+    return (cms as any).deployedCanonicals?.get(url);
   }
 }

@@ -1,5 +1,6 @@
 import { IActionExecutor } from './actionExecutorInterface';
 import { ActionType, ActionTarget, ValidationResult, ExecutionResult, RollbackResult } from '../actionTypes';
+import { CmsProviderRegistry } from '../cms/cmsProviderRegistry';
 
 export interface RedirectPayload {
   sourceUrl: string;
@@ -13,8 +14,6 @@ export interface RedirectPreState {
   previousStatusCode: number | null;
   capturedAt: string;
 }
-
-const liveRedirectMap: Map<string, { destinationUrl: string; statusCode: number }> = new Map();
 
 export class RedirectActionExecutor implements IActionExecutor<RedirectPayload, RedirectPreState> {
   readonly actionType: ActionType = 'CREATE_REDIRECT_RULE';
@@ -30,7 +29,8 @@ export class RedirectActionExecutor implements IActionExecutor<RedirectPayload, 
   }
 
   async capturePreState(target: ActionTarget): Promise<RedirectPreState> {
-    const existing = liveRedirectMap.get(target.targetUrl);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const existing = await cms.getRedirectRule(target.targetUrl);
     return {
       sourceUrl: target.targetUrl,
       previousDestination: existing?.destinationUrl || null,
@@ -44,43 +44,39 @@ export class RedirectActionExecutor implements IActionExecutor<RedirectPayload, 
     payload: RedirectPayload,
     preState: RedirectPreState
   ): Promise<ExecutionResult> {
-    const rule = {
-      destinationUrl: payload.destinationUrl,
-      statusCode: payload.statusCode || 301,
-    };
-    liveRedirectMap.set(payload.sourceUrl, rule);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.createRedirectRule(payload.sourceUrl, payload.destinationUrl, payload.statusCode || 301);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `exec-redirect-${Date.now()}`,
-      appliedState: rule,
+      appliedState: { destinationUrl: payload.destinationUrl, statusCode: payload.statusCode || 301 },
       preStateSnapshot: preState,
       executedAt: new Date(),
-      message: `Created HTTP ${rule.statusCode} redirect from ${payload.sourceUrl} -> ${payload.destinationUrl}`,
-      diffSummary: `Redirect: ${payload.sourceUrl} -> ${payload.destinationUrl} (${rule.statusCode})`,
+      message: cmsRes.message || `Created HTTP ${payload.statusCode || 301} redirect from ${payload.sourceUrl} -> ${payload.destinationUrl}`,
+      diffSummary: `Redirect: ${payload.sourceUrl} -> ${payload.destinationUrl} (${payload.statusCode || 301}) [${cms.platform}]`,
     };
   }
 
   async rollback(target: ActionTarget, preState: RedirectPreState): Promise<RollbackResult> {
-    if (preState.previousDestination && preState.previousStatusCode) {
-      liveRedirectMap.set(preState.sourceUrl, {
-        destinationUrl: preState.previousDestination,
-        statusCode: preState.previousStatusCode,
-      });
-    } else {
-      liveRedirectMap.delete(preState.sourceUrl);
-    }
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const previousRule = preState.previousDestination && preState.previousStatusCode
+      ? { destinationUrl: preState.previousDestination, statusCode: preState.previousStatusCode }
+      : null;
+
+    const cmsRes = await cms.revertRedirectRule(preState.sourceUrl, previousRule);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `rollback-redirect-${Date.now()}`,
       restoredState: preState,
       rolledBackAt: new Date(),
-      message: `Removed redirect rule for ${preState.sourceUrl}`,
+      message: cmsRes.message || `Removed redirect rule for ${preState.sourceUrl}`,
     };
   }
 
-  public static getDeployedRedirect(sourceUrl: string) {
-    return liveRedirectMap.get(sourceUrl);
+  public static getDeployedRedirect(sourceUrl: string, platform?: string) {
+    const cms = CmsProviderRegistry.getProvider(platform);
+    return (cms as any).deployedRedirects?.get(sourceUrl);
   }
 }

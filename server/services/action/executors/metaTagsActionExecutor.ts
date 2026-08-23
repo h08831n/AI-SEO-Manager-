@@ -1,5 +1,6 @@
 import { IActionExecutor } from './actionExecutorInterface';
 import { ActionType, ActionTarget, ValidationResult, ExecutionResult, RollbackResult } from '../actionTypes';
+import { CmsProviderRegistry } from '../cms/cmsProviderRegistry';
 
 export interface MetaTagsPayload {
   targetUrl: string;
@@ -16,8 +17,6 @@ export interface MetaTagsPreState {
   capturedAt: string;
 }
 
-const liveMetaRegistry: Map<string, { title?: string; description?: string; robotsMeta?: string }> = new Map();
-
 export class MetaTagsActionExecutor implements IActionExecutor<MetaTagsPayload, MetaTagsPreState> {
   readonly actionType: ActionType = 'SET_META_TAGS';
 
@@ -33,7 +32,8 @@ export class MetaTagsActionExecutor implements IActionExecutor<MetaTagsPayload, 
   }
 
   async capturePreState(target: ActionTarget): Promise<MetaTagsPreState> {
-    const existing = liveMetaRegistry.get(target.targetUrl);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const existing = await cms.getMetaTags(target.targetUrl);
     return {
       targetUrl: target.targetUrl,
       title: existing?.title || null,
@@ -48,46 +48,39 @@ export class MetaTagsActionExecutor implements IActionExecutor<MetaTagsPayload, 
     payload: MetaTagsPayload,
     preState: MetaTagsPreState
   ): Promise<ExecutionResult> {
-    const current = liveMetaRegistry.get(target.targetUrl) || {};
-    const updated = {
-      title: payload.title !== undefined ? payload.title : current.title,
-      description: payload.description !== undefined ? payload.description : current.description,
-      robotsMeta: payload.robotsMeta !== undefined ? payload.robotsMeta : current.robotsMeta,
-    };
-    liveMetaRegistry.set(target.targetUrl, updated);
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.setMetaTags(target.targetUrl, {
+      title: payload.title,
+      description: payload.description,
+      robotsMeta: payload.robotsMeta,
+    });
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `exec-meta-${Date.now()}`,
-      appliedState: updated,
+      appliedState: cmsRes.appliedData,
       preStateSnapshot: preState,
       executedAt: new Date(),
-      message: 'Successfully deployed updated title and metadata',
-      diffSummary: `Title: "${preState.title || ''}" -> "${updated.title || ''}" | Description: "${preState.description || ''}" -> "${updated.description || ''}"`,
+      message: cmsRes.message || 'Successfully deployed updated title and metadata',
+      diffSummary: `Title: "${preState.title || ''}" -> "${payload.title || ''}" | Description: "${preState.description || ''}" -> "${payload.description || ''}" [${cms.platform}]`,
     };
   }
 
   async rollback(target: ActionTarget, preState: MetaTagsPreState): Promise<RollbackResult> {
-    if (preState.title || preState.description || preState.robotsMeta) {
-      liveMetaRegistry.set(target.targetUrl, {
-        title: preState.title || undefined,
-        description: preState.description || undefined,
-        robotsMeta: preState.robotsMeta || undefined,
-      });
-    } else {
-      liveMetaRegistry.delete(target.targetUrl);
-    }
+    const cms = CmsProviderRegistry.getProvider(target.platform);
+    const cmsRes = await cms.revertMetaTags(target.targetUrl, preState);
 
     return {
-      success: true,
+      success: cmsRes.success,
       actionId: `rollback-meta-${Date.now()}`,
       restoredState: preState,
       rolledBackAt: new Date(),
-      message: 'Successfully restored previous meta tags',
+      message: cmsRes.message || 'Successfully restored previous meta tags',
     };
   }
 
-  public static getDeployedMeta(url: string) {
-    return liveMetaRegistry.get(url);
+  public static getDeployedMeta(url: string, platform?: string) {
+    const cms = CmsProviderRegistry.getProvider(platform);
+    return (cms as any).deployedMeta?.get(url);
   }
 }

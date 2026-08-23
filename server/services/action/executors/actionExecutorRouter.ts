@@ -5,6 +5,7 @@ import { MetaTagsActionExecutor } from './metaTagsActionExecutor';
 import { StructuredDataActionExecutor } from './structuredDataActionExecutor';
 import { RedirectActionExecutor } from './redirectActionExecutor';
 import { InternalLinkActionExecutor } from './internalLinkActionExecutor';
+import { ContentRefreshActionExecutor } from './contentRefreshActionExecutor';
 
 export class ActionExecutorRouter {
   private static executors: Map<string, IActionExecutor> = new Map();
@@ -15,6 +16,7 @@ export class ActionExecutorRouter {
     this.registerExecutor(new StructuredDataActionExecutor());
     this.registerExecutor(new RedirectActionExecutor());
     this.registerExecutor(new InternalLinkActionExecutor());
+    this.registerExecutor(new ContentRefreshActionExecutor());
   }
 
   public static registerExecutor(executor: IActionExecutor): void {

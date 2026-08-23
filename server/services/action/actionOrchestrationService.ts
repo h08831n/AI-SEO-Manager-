@@ -5,6 +5,7 @@ import { GovernanceEngine } from './governanceEngine';
 import { VerificationEngine } from './verificationEngine';
 import { LearningLoopEngine } from '../decision/learningLoopEngine';
 import { AuditLogRepository } from '../../repositories/auditLogRepository';
+import { ActionSnapshotService } from './snapshots/actionSnapshotService';
 
 export interface ExecuteActionParams {
   websiteId: string;
@@ -18,6 +19,7 @@ export interface ExecuteActionParams {
   userRole?: string;
   isDryRun?: boolean;
   autoVerify?: boolean;
+  platform?: string;
 }
 
 export class ActionOrchestrationService {
@@ -48,6 +50,7 @@ export class ActionOrchestrationService {
       userRole,
       isDryRun = false,
       autoVerify = true,
+      platform,
     } = params;
 
     // 1. Idempotency Check
@@ -71,6 +74,7 @@ export class ActionOrchestrationService {
       websiteId,
       targetUrl,
       domain: website?.domain || 'example.com',
+      platform,
     };
 
     const executor = ActionExecutorRouter.getExecutor(actionType);
@@ -123,10 +127,19 @@ export class ActionOrchestrationService {
       },
     });
 
-    // 7. Execute Atomic Action
+    // 7. Persist Snapshot in ActionSnapshotService for restart survival
+    await ActionSnapshotService.savePreStateSnapshot({
+      actionExecutionId: actionExecution.id,
+      websiteId,
+      actionType,
+      targetUrl,
+      preState: preStateSnapshot,
+    });
+
+    // 8. Execute Atomic Action
     const execResult = await executor.apply(target, payload, preStateSnapshot);
 
-    // 8. Update DB with applied state
+    // 9. Update DB with applied state
     await prisma.actionExecution.update({
       where: { id: actionExecution.id },
       data: {
@@ -145,7 +158,7 @@ export class ActionOrchestrationService {
       });
     }
 
-    // 9. Immutable Audit Log & Outbox Event
+    // 10. Immutable Audit Log & Outbox Event
     await AuditLogRepository.log({
       websiteId,
       actionName: `EXECUTE_${actionType}`,
@@ -174,25 +187,25 @@ export class ActionOrchestrationService {
       },
     });
 
-    // 10. Automated Closed-Loop Tier 1 Verification
+    // 11. Automated Closed-Loop Verification (Stage 1: HTTP / DOM / Schema)
     let verificationResult: any = null;
     let rolledBack = false;
 
     if (autoVerify) {
-      // Find recommendation rule key if available
       let ruleKey: string | undefined;
       if (recommendationId) {
         const rec = await prisma.seoRecommendation.findUnique({ where: { id: recommendationId } });
         ruleKey = rec?.ruleKey || undefined;
       }
 
-      verificationResult = await VerificationEngine.runTier1ImmediateVerification({
+      verificationResult = await VerificationEngine.runStage1SyntheticVerification({
         actionExecutionId: actionExecution.id,
         websiteId,
         actionType,
         targetUrl,
         expectedState: payload,
         ruleKey,
+        platform,
       });
 
       // If immediate synthetic verification fails -> AUTOMATIC ROLLBACK
@@ -200,7 +213,8 @@ export class ActionOrchestrationService {
         const rollbackRes = await this.rollbackAction({
           actionExecutionId: actionExecution.id,
           websiteId,
-          reason: `Automatic rollback triggered: Tier 1 verification failed (${verificationResult.varianceDetails})`,
+          reason: `Automatic rollback triggered: Stage 1 synthetic verification failed (${verificationResult.varianceDetails})`,
+          platform,
         });
         rolledBack = rollbackRes.success;
       } else if (taskId) {
@@ -226,14 +240,17 @@ export class ActionOrchestrationService {
 
   /**
    * Executes a 1-click deterministic rollback by restoring the pre-state snapshot.
+   * Survives worker restarts by reloading snapshot from durable database storage.
    */
   public static async rollbackAction(params: {
     actionExecutionId: string;
     websiteId: string;
     reason?: string;
     userId?: string;
+    platform?: string;
   }): Promise<{ success: boolean; message: string; restoredState: any }> {
-    const { actionExecutionId, websiteId, reason, userId } = params;
+    const startTime = Date.now();
+    const { actionExecutionId, websiteId, reason, userId, platform } = params;
 
     const execution = await prisma.actionExecution.findFirst({
       where: { id: actionExecutionId, websiteId },
@@ -244,7 +261,14 @@ export class ActionOrchestrationService {
       throw new Error(`Action execution '${actionExecutionId}' not found for website '${websiteId}'`);
     }
 
-    const preStateSnapshot = execution.beforeEvidenceJson ? JSON.parse(execution.beforeEvidenceJson) : null;
+    // Retrieve snapshot from persistent SnapshotService (handles worker restart recovery)
+    const snapshotEntity = await ActionSnapshotService.getPreStateSnapshot(actionExecutionId);
+    let preStateSnapshot = snapshotEntity?.preStateJson ? JSON.parse(snapshotEntity.preStateJson) : null;
+
+    if (!preStateSnapshot && execution.beforeEvidenceJson) {
+      preStateSnapshot = JSON.parse(execution.beforeEvidenceJson);
+    }
+
     if (!preStateSnapshot) {
       throw new Error(`Cannot rollback action '${actionExecutionId}': Missing preStateSnapshot.`);
     }
@@ -254,6 +278,7 @@ export class ActionOrchestrationService {
       websiteId,
       targetUrl: execution.targetUrl,
       domain: website?.domain || 'example.com',
+      platform,
     };
 
     const executor = ActionExecutorRouter.getExecutor(execution.actionType);
@@ -276,12 +301,25 @@ export class ActionOrchestrationService {
       });
     }
 
-    // Learning Loop: Record Rollback
+    // Persist to RollbackExecutionHistory
+    await ActionSnapshotService.recordRollbackHistory({
+      actionExecutionId,
+      websiteId,
+      rolledBackByUserId: userId,
+      reason: reason || 'Rollback triggered',
+      preStateRestored: rollbackResult.restoredState,
+      success: rollbackResult.success,
+      durationMs: Date.now() - startTime,
+    });
+
+    // Learning Loop: Record Rollback outcome
     const ruleKey = execution.recommendation?.ruleKey;
     if (ruleKey) {
       await LearningLoopEngine.recordActionOutcome({
         ruleKey,
         websiteId,
+        actionExecutionId,
+        actionType: execution.actionType,
         outcome: 'ROLLED_BACK',
       });
     }
