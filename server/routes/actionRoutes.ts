@@ -3,6 +3,7 @@ import { ActionOrchestrationService } from '../services/action/actionOrchestrati
 import { VerificationEngine } from '../services/action/verificationEngine';
 import { ActionApprovalCenter } from '../services/action/approval/actionApprovalCenter';
 import { ActionSnapshotService } from '../services/action/snapshots/actionSnapshotService';
+import { StuckExecutionWatchdog } from '../services/action/approval/stuckExecutionWatchdog';
 import { ApprovalState } from '../services/action/approval/approvalTypes';
 import { prisma } from '../db/prisma';
 import { z } from 'zod';
@@ -207,6 +208,35 @@ router.get('/rollback-history', async (req: Request, res: Response) => {
   const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const history = await ActionSnapshotService.getRollbackHistory(websiteId);
   return res.json({ history });
+});
+
+// POST /api/actions/watchdog/scan
+router.post('/watchdog/scan', async (req: Request, res: Response) => {
+  try {
+    const { executingTimeoutMs, verifyingTimeoutMs, autoResolveStrategy } = req.body || {};
+    const result = await StuckExecutionWatchdog.scanAndResolveStuckActions({
+      executingTimeoutMs,
+      verifyingTimeoutMs,
+      autoResolveStrategy,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/actions/watchdog/resolve
+router.post('/watchdog/resolve', async (req: Request, res: Response) => {
+  try {
+    const { actionId, strategy, reason } = req.body || {};
+    if (!actionId || !strategy) {
+      return res.status(400).json({ error: 'actionId and strategy are required' });
+    }
+    const result = await StuckExecutionWatchdog.applyResolution(actionId, strategy, reason || 'Manual operator trigger');
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/actions

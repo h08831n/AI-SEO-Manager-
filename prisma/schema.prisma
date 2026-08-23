@@ -963,7 +963,10 @@ model ActionApprovalRequest {
   website           Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   transitionLogs    ActionStateTransitionLog[]
 
-  @@index([websiteId, state])
+  @@index([websiteId])
+  @@index([state])
+  @@index([createdAt])
+  @@index([websiteId, state, createdAt])
   @@map("action_approval_requests")
 }
 

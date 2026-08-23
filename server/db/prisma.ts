@@ -7,6 +7,17 @@ function createInMemoryTable(tableName: string) {
 
   function matchesFilter(item: any, where: any): boolean {
     if (!where) return true;
+
+    // Handle top-level OR array
+    if (Array.isArray(where.OR)) {
+      return where.OR.some((subWhere: any) => matchesFilter(item, subWhere));
+    }
+
+    // Handle top-level AND array
+    if (Array.isArray(where.AND)) {
+      return where.AND.every((subWhere: any) => matchesFilter(item, subWhere));
+    }
+
     for (const [key, val] of Object.entries(where)) {
       if (val === undefined) continue;
 
@@ -28,7 +39,7 @@ function createInMemoryTable(tableName: string) {
         } else {
           // Composite index key filter (e.g. websiteId_normalizedUrl)
           for (const [subKey, subVal] of Object.entries(val)) {
-            if (subVal === undefined) continue;
+            if (subKey === undefined) continue;
             if (subVal === null) {
               if (item[subKey] != null) return false;
             } else if (subVal instanceof Date && item[subKey] instanceof Date) {
@@ -115,7 +126,8 @@ function createInMemoryTable(tableName: string) {
         }
       }
       if (!target) return null;
-      const updated = { ...target, ...args.data, updatedAt: new Date() };
+      const updatedAt = args.data.updatedAt !== undefined ? args.data.updatedAt : new Date();
+      const updated = { ...target, ...args.data, updatedAt };
       store.set(target.id, updated);
       return updated;
     },
@@ -123,7 +135,8 @@ function createInMemoryTable(tableName: string) {
       let count = 0;
       for (const item of Array.from(store.values())) {
         if (matchesFilter(item, args.where)) {
-          const updated = { ...item, ...args.data, updatedAt: new Date() };
+          const updatedAt = args.data.updatedAt !== undefined ? args.data.updatedAt : new Date();
+          const updated = { ...item, ...args.data, updatedAt };
           store.set(item.id, updated);
           count++;
         }
