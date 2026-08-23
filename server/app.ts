@@ -13,6 +13,8 @@ import observabilityRoutes from './routes/observabilityRoutes';
 import { keywordRoutes } from './routes/keywordRoutes';
 import { serpRoutes } from './routes/serpRoutes';
 import { competitorRoutes } from './routes/competitorRoutes';
+import decisionRoutes from './routes/decisionRoutes';
+import actionRoutes from './routes/actionRoutes';
 
 // Support BigInt serialization in JSON responses
 (BigInt.prototype as any).toJSON = function () {
@@ -74,6 +76,8 @@ export function createApp() {
   app.use('/api/keywords', keywordRoutes);
   app.use('/api/serp', serpRoutes);
   app.use('/api/competitors', competitorRoutes);
+  app.use('/api/decision', decisionRoutes);
+  app.use('/api/actions', actionRoutes);
 
   // Legacy route aliases for backward compatibility
   app.post('/api/crawl', (req, res, next) => {

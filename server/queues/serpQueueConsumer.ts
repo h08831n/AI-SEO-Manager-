@@ -11,6 +11,7 @@ export class SerpQueueConsumer {
 
   start() {
     if (this.worker) return;
+    if (!process.env.REDIS_URL) return;
     const connection = getRedisConnection();
 
     this.worker = new Worker<SerpJobData>(

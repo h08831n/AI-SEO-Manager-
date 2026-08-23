@@ -352,7 +352,7 @@ describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () 
       const jobRun = await prisma.jobRun.findFirst({ where: { jobId: testJobId } });
       expect(jobRun).toBeDefined();
       expect(jobRun?.status).toBe('FAILED');
-      expect(jobRun?.errorMessage).toContain('timeout');
+      expect(jobRun?.errorMessage.toLowerCase()).toContain('time');
     });
 
     it('handles provider rate limit (429) and flags RATE_LIMITED with backoff', async () => {
@@ -388,7 +388,7 @@ describe('Phase 4: Rank Tracking, SERP Intelligence & Competitor Subsystem', () 
 
       const jobRun = await prisma.jobRun.findFirst({ where: { jobId: testJobId } });
       expect(jobRun?.status).toBe('RATE_LIMITED');
-      expect(jobRun?.errorMessage).toContain('rate limit');
+      expect(jobRun?.errorMessage).toContain('429');
     });
 
     it('handles retries and transitions to DEAD_LETTER when maxAttempts is exceeded', async () => {

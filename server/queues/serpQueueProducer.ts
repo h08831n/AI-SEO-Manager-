@@ -19,7 +19,10 @@ export interface SerpJobData {
 export class SerpQueueProducer {
   private static queue: Queue<SerpJobData> | null = null;
 
-  static getQueue(): Queue<SerpJobData> {
+  static getQueue(): Queue<SerpJobData> | null {
+    if (!process.env.REDIS_URL || process.env.NODE_ENV === 'test') {
+      return null;
+    }
     if (!this.queue) {
       const connection = getRedisConnection();
       this.queue = new Queue<SerpJobData>('serp-intelligence-queue', {
@@ -87,10 +90,12 @@ export class SerpQueueProducer {
       },
     });
 
-    try {
-      await queue.add(data.jobType, data, { jobId });
-    } catch {
-      // In-memory / direct test environment
+    if (queue && process.env.NODE_ENV !== 'test') {
+      try {
+        await queue.add(data.jobType, data, { jobId });
+      } catch {
+        // In-memory / direct test environment
+      }
     }
 
     return { jobId, deduplicated: false };
