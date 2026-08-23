@@ -1,4 +1,5 @@
 import { startBackgroundWorker } from './services/worker/backgroundWorker';
+import { ActionWatchdogWorker } from './services/worker/actionWatchdogWorker';
 import { CrawlerQueueConsumer } from './queues/crawlerQueueConsumer';
 import { SyncQueueConsumer } from './queues/syncQueueConsumer';
 import { OutboxDispatcher } from './services/outbox/outboxDispatcher';
@@ -13,8 +14,9 @@ SyncQueueConsumer.start();
 // 2. Start Transactional Outbox Polling
 OutboxDispatcher.startPolling(2000);
 
-// 3. Start Background Task Worker
+// 3. Start Background Task Worker & Action Stuck Execution Watchdog Worker (5 min interval)
 const workerRuntime = startBackgroundWorker();
+const watchdogWorkerRuntime = ActionWatchdogWorker.start();
 
 // 4. Periodic Worker Heartbeat emitter (local + shared)
 const heartbeatTimer = setInterval(() => {
@@ -27,6 +29,7 @@ const shutdown = async (signal: string) => {
   clearInterval(heartbeatTimer);
   OutboxDispatcher.stopPolling();
   try {
+    await watchdogWorkerRuntime.stop();
     await CrawlerQueueConsumer.shutdown();
     await SyncQueueConsumer.stop();
     await workerRuntime.stop();
