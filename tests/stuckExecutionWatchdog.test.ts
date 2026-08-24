@@ -3,169 +3,145 @@ import { prisma } from '../server/db/prisma';
 import { ActionApprovalCenter } from '../server/services/action/approval/actionApprovalCenter';
 import { StuckExecutionWatchdog } from '../server/services/action/approval/stuckExecutionWatchdog';
 
-describe('Stuck Execution Watchdog & Recovery Subsystem Suite', () => {
-  const websiteId = 'site-watchdog-hardening-test';
+describe('Stuck Execution Watchdog & Risk-Based Recovery Policy Suite', () => {
+  const websiteId = 'site-watchdog-risk-policy-test';
 
-  it('1. Detects stuck actions in EXECUTING and VERIFYING states beyond timeout and emits ACTION_STUCK_EXECUTION outbox events', async () => {
-    // 1. Propose and advance action 1 to EXECUTING
-    const itemExecuting = await ActionApprovalCenter.proposeAction({
+  it('1. Enforces Risk-Based Recovery Matrix during autonomous watchdog scan: LOW -> RETRY, MEDIUM -> REVIEW TASK, HIGH -> ROLLBACK SUGGESTION', async () => {
+    // 1. Setup LOW RISK action stuck in EXECUTING (LEVEL_1_SAFE_AUTOMATION)
+    const lowRiskItem = await ActionApprovalCenter.proposeAction({
       websiteId,
       actionType: 'SET_CANONICAL_URL',
-      targetUrl: 'https://watchdog.techscale.io/stuck-exec-1',
-      payload: { canonicalUrl: 'https://watchdog.techscale.io/target-1' },
+      targetUrl: 'https://watchdog.techscale.io/low-risk',
+      payload: { canonicalUrl: 'https://watchdog.techscale.io/target' },
       riskLevel: 'LEVEL_1_SAFE_AUTOMATION',
     });
-    await ActionApprovalCenter.approveAction({ actionId: itemExecuting.id, userId: 'admin-lead' });
-    await ActionApprovalCenter.queueAction(itemExecuting.id, 'WORKER');
-    await ActionApprovalCenter.markExecuting(itemExecuting.id, `exec-${Date.now()}`, 'WORKER');
+    await ActionApprovalCenter.approveAction({ actionId: lowRiskItem.id, userId: 'admin-lead' });
+    await ActionApprovalCenter.queueAction(lowRiskItem.id, 'WORKER');
+    await ActionApprovalCenter.markExecuting(lowRiskItem.id, `exec-low-${Date.now()}`, 'WORKER');
 
-    // 2. Propose and advance action 2 to VERIFYING
-    const itemVerifying = await ActionApprovalCenter.proposeAction({
+    // 2. Setup MEDIUM RISK action stuck in EXECUTING (LEVEL_2_REVIEW_REQUIRED)
+    const mediumRiskItem = await ActionApprovalCenter.proposeAction({
       websiteId,
-      actionType: 'INJECT_STRUCTURED_DATA',
-      targetUrl: 'https://watchdog.techscale.io/stuck-verify-1',
-      payload: { schemaType: 'Article' },
+      actionType: 'SET_META_TAGS',
+      targetUrl: 'https://watchdog.techscale.io/medium-risk',
+      payload: { title: 'Updated Meta Description' },
       riskLevel: 'LEVEL_2_REVIEW_REQUIRED',
     });
-    await ActionApprovalCenter.approveAction({ actionId: itemVerifying.id, userId: 'admin-lead' });
-    await ActionApprovalCenter.queueAction(itemVerifying.id, 'WORKER');
-    await ActionApprovalCenter.markExecuting(itemVerifying.id, `exec-verify-${Date.now()}`, 'WORKER');
-    await ActionApprovalCenter.markVerifying(itemVerifying.id, 'STAGE_1_SYNTHETIC_DOM', 'VERIFIER');
+    await ActionApprovalCenter.approveAction({ actionId: mediumRiskItem.id, userId: 'admin-lead' });
+    await ActionApprovalCenter.queueAction(mediumRiskItem.id, 'WORKER');
+    await ActionApprovalCenter.markExecuting(mediumRiskItem.id, `exec-med-${Date.now()}`, 'WORKER');
 
-    // Backdate updatedAt timestamps in Prisma to simulate timeout expiration
-    const tenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+    // 3. Setup HIGH RISK action stuck in EXECUTING (LEVEL_3_HIGH_RISK_MANUAL)
+    const highRiskItem = await ActionApprovalCenter.proposeAction({
+      websiteId,
+      actionType: 'CREATE_REDIRECT_RULE',
+      targetUrl: 'https://watchdog.techscale.io/high-risk',
+      payload: { destinationUrl: 'https://watchdog.techscale.io/new-dest' },
+      riskLevel: 'LEVEL_3_HIGH_RISK_MANUAL',
+    });
+    await ActionApprovalCenter.approveAction({ actionId: highRiskItem.id, userId: 'admin-lead' });
+    await ActionApprovalCenter.queueAction(highRiskItem.id, 'WORKER');
+    await ActionApprovalCenter.markExecuting(highRiskItem.id, `exec-high-${Date.now()}`, 'WORKER');
+
+    // Backdate timestamps
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
     await prisma.actionApprovalRequest.update({
-      where: { id: itemExecuting.id },
-      data: { updatedAt: tenMinutesAgo },
+      where: { id: lowRiskItem.id },
+      data: { updatedAt: fifteenMinutesAgo },
     });
     await prisma.actionApprovalRequest.update({
-      where: { id: itemVerifying.id },
-      data: { updatedAt: tenMinutesAgo },
+      where: { id: mediumRiskItem.id },
+      data: { updatedAt: fifteenMinutesAgo },
+    });
+    await prisma.actionApprovalRequest.update({
+      where: { id: highRiskItem.id },
+      data: { updatedAt: fifteenMinutesAgo },
     });
 
-    // 3. Trigger watchdog scan with a 5000ms threshold
+    // 4. Trigger scan under RISK_BASED policy
     const scanResult = await StuckExecutionWatchdog.scanAndResolveStuckActions({
       executingTimeoutMs: 5000,
       verifyingTimeoutMs: 5000,
-      autoResolveStrategy: 'NONE',
+      policyMode: 'RISK_BASED',
     });
 
-    expect(scanResult.stuckCount).toBeGreaterThanOrEqual(2);
-    const foundExecuting = scanResult.incidents.find((inc) => inc.actionId === itemExecuting.id);
-    const foundVerifying = scanResult.incidents.find((inc) => inc.actionId === itemVerifying.id);
+    expect(scanResult.stuckCount).toBeGreaterThanOrEqual(3);
 
-    expect(foundExecuting).toBeDefined();
-    expect(foundExecuting?.state).toBe('EXECUTING');
-    expect(foundExecuting?.recommendedResolution).toBe('RETRY');
+    // Verify LOW RISK action resolution -> RETRY allowed
+    const resolvedLow = scanResult.resolvedActions.find((a) => a.actionId === lowRiskItem.id);
+    expect(resolvedLow?.resolutionApplied).toBe('RETRY');
+    expect(resolvedLow?.newState).toBe('QUEUED');
+    const dbLow = await prisma.actionApprovalRequest.findUnique({ where: { id: lowRiskItem.id } });
+    expect(dbLow?.state).toBe('QUEUED');
 
-    expect(foundVerifying).toBeDefined();
-    expect(foundVerifying?.state).toBe('VERIFYING');
-    expect(foundVerifying?.recommendedResolution).toBe('ROLLBACK_SUGGESTION');
+    // Verify MEDIUM RISK action resolution -> Created review task
+    const resolvedMed = scanResult.resolvedActions.find((a) => a.actionId === mediumRiskItem.id);
+    expect(resolvedMed?.resolutionApplied).toBe('MANUAL_REVIEW_ESCALATION');
+    expect(resolvedMed?.newState).toBe('REJECTED');
+    expect(resolvedMed?.taskId).toBeDefined();
+    const dbMed = await prisma.actionApprovalRequest.findUnique({ where: { id: mediumRiskItem.id } });
+    expect(dbMed?.state).toBe('REJECTED');
+    expect(dbMed?.rejectionReason).toContain('WATCHDOG_REVIEW_TASK_CREATED');
 
-    // 4. Verify ACTION_STUCK_EXECUTION outbox events were generated in the database
+    // Verify Task record exists in DB
+    const reviewTask = await prisma.seoTask.findUnique({ where: { id: resolvedMed?.taskId } });
+    expect(reviewTask).toBeDefined();
+    expect(reviewTask?.websiteId).toBe(websiteId);
+    expect(reviewTask?.priority).toBe('HIGH');
+
+    // Verify HIGH RISK action resolution -> ROLLBACK_SUGGESTION only
+    const resolvedHigh = scanResult.resolvedActions.find((a) => a.actionId === highRiskItem.id);
+    expect(resolvedHigh?.resolutionApplied).toBe('ROLLBACK_SUGGESTION');
+    expect(resolvedHigh?.newState).toBe('ROLLED_BACK');
+    const dbHigh = await prisma.actionApprovalRequest.findUnique({ where: { id: highRiskItem.id } });
+    expect(dbHigh?.state).toBe('ROLLED_BACK');
+
+    // Verify audit logs for all 3 actions
+    const lowLogs = await ActionApprovalCenter.getTransitionLogs(lowRiskItem.id);
+    expect(lowLogs[lowLogs.length - 1].reason).toContain('WATCHDOG_RETRY');
+
+    const medLogs = await ActionApprovalCenter.getTransitionLogs(mediumRiskItem.id);
+    expect(medLogs[medLogs.length - 1].reason).toContain('WATCHDOG_MANUAL_REVIEW_TASK');
+
+    const highLogs = await ActionApprovalCenter.getTransitionLogs(highRiskItem.id);
+    expect(highLogs[highLogs.length - 1].reason).toContain('WATCHDOG_ROLLBACK_SUGGESTION');
+  });
+
+  it('2. Emits structured ACTION_STUCK_EXECUTION outbox events with policy audit data', async () => {
+    const item = await ActionApprovalCenter.proposeAction({
+      websiteId,
+      actionType: 'INJECT_STRUCTURED_DATA',
+      targetUrl: 'https://watchdog.techscale.io/schema-stuck',
+      payload: { schemaType: 'FAQPage' },
+      riskLevel: 'LEVEL_1_SAFE_AUTOMATION',
+    });
+    await ActionApprovalCenter.approveAction({ actionId: item.id, userId: 'admin' });
+    await ActionApprovalCenter.queueAction(item.id, 'WORKER');
+    await ActionApprovalCenter.markExecuting(item.id, `exec-${Date.now()}`, 'WORKER');
+
+    const twentyMinAgo = new Date(Date.now() - 20 * 60 * 1000);
+    await prisma.actionApprovalRequest.update({
+      where: { id: item.id },
+      data: { updatedAt: twentyMinAgo },
+    });
+
+    await StuckExecutionWatchdog.scanAndResolveStuckActions({
+      executingTimeoutMs: 5000,
+      policyMode: 'RISK_BASED',
+    });
+
     const outboxEvents = await prisma.outboxEvent.findMany({
       where: {
         eventType: 'ACTION_STUCK_EXECUTION',
-        aggregateId: { in: [itemExecuting.id, itemVerifying.id] },
+        aggregateId: item.id,
       },
     });
 
-    expect(outboxEvents.length).toBe(2);
-    const parsedPayload = JSON.parse(outboxEvents[0].payloadJson);
-    expect(parsedPayload.actionId).toBeDefined();
-    expect(parsedPayload.thresholdMs).toBe(5000);
-  });
-
-  it('2. Supports automated RETRY resolution by re-queuing stuck action', async () => {
-    const itemToRetry = await ActionApprovalCenter.proposeAction({
-      websiteId,
-      actionType: 'SET_META_TAGS',
-      targetUrl: 'https://watchdog.techscale.io/retry-page',
-      payload: { title: 'New Meta Title' },
-    });
-    await ActionApprovalCenter.approveAction({ actionId: itemToRetry.id, userId: 'admin' });
-    await ActionApprovalCenter.queueAction(itemToRetry.id, 'WORKER');
-    await ActionApprovalCenter.markExecuting(itemToRetry.id, `exec-retry-${Date.now()}`, 'WORKER');
-
-    // Apply RETRY resolution via watchdog
-    const retryResult = await StuckExecutionWatchdog.applyResolution(
-      itemToRetry.id,
-      'RETRY',
-      'Worker node connection reset timeout'
-    );
-
-    expect(retryResult).not.toBeNull();
-    expect(retryResult?.resolutionApplied).toBe('RETRY');
-    expect(retryResult?.newState).toBe('QUEUED');
-
-    // Verify DB state
-    const dbAction = await prisma.actionApprovalRequest.findUnique({
-      where: { id: itemToRetry.id },
-    });
-    expect(dbAction?.state).toBe('QUEUED');
-
-    const logs = await ActionApprovalCenter.getTransitionLogs(itemToRetry.id);
-    const latestLog = logs[logs.length - 1];
-    expect(latestLog.newState).toBe('QUEUED');
-    expect(latestLog.reason).toContain('WATCHDOG_RETRY');
-  });
-
-  it('3. Supports automated ROLLBACK_SUGGESTION resolution for stalled verifications', async () => {
-    const itemToRollback = await ActionApprovalCenter.proposeAction({
-      websiteId,
-      actionType: 'CREATE_REDIRECT_RULE',
-      targetUrl: 'https://watchdog.techscale.io/old-url',
-      payload: { destinationUrl: 'https://watchdog.techscale.io/new-url', statusCode: 301 },
-    });
-    await ActionApprovalCenter.approveAction({ actionId: itemToRollback.id, userId: 'admin' });
-    await ActionApprovalCenter.queueAction(itemToRollback.id, 'WORKER');
-    await ActionApprovalCenter.markExecuting(itemToRollback.id, `exec-rb-${Date.now()}`, 'WORKER');
-    await ActionApprovalCenter.markVerifying(itemToRollback.id, 'STAGE_1_SYNTHETIC_DOM', 'VERIFIER');
-
-    // Apply ROLLBACK_SUGGESTION resolution via watchdog
-    const rollbackResult = await StuckExecutionWatchdog.applyResolution(
-      itemToRollback.id,
-      'ROLLBACK_SUGGESTION',
-      'Target endpoint returned unexpected variance during verification'
-    );
-
-    expect(rollbackResult).not.toBeNull();
-    expect(rollbackResult?.resolutionApplied).toBe('ROLLBACK_SUGGESTION');
-    expect(rollbackResult?.newState).toBe('ROLLED_BACK');
-
-    const dbAction = await prisma.actionApprovalRequest.findUnique({
-      where: { id: itemToRollback.id },
-    });
-    expect(dbAction?.state).toBe('ROLLED_BACK');
-  });
-
-  it('4. Supports MANUAL_REVIEW_ESCALATION placing stuck action into REJECTED state with audit notes', async () => {
-    const itemToEscalate = await ActionApprovalCenter.proposeAction({
-      websiteId,
-      actionType: 'INJECT_INTERNAL_LINK',
-      targetUrl: 'https://watchdog.techscale.io/hub-page',
-      payload: { links: [{ targetUrl: 'https://watchdog.techscale.io/dest', anchorText: 'Link' }] },
-      riskLevel: 'LEVEL_3_HIGH_RISK_MANUAL',
-    });
-    await ActionApprovalCenter.approveAction({ actionId: itemToEscalate.id, userId: 'admin' });
-    await ActionApprovalCenter.queueAction(itemToEscalate.id, 'WORKER');
-    await ActionApprovalCenter.markExecuting(itemToEscalate.id, `exec-esc-${Date.now()}`, 'WORKER');
-
-    // Apply MANUAL_REVIEW_ESCALATION
-    const escResult = await StuckExecutionWatchdog.applyResolution(
-      itemToEscalate.id,
-      'MANUAL_REVIEW_ESCALATION',
-      'Execution hung on CMS lock beyond 10 minutes'
-    );
-
-    expect(escResult).not.toBeNull();
-    expect(escResult?.resolutionApplied).toBe('MANUAL_REVIEW_ESCALATION');
-    expect(escResult?.newState).toBe('REJECTED');
-
-    const dbAction = await prisma.actionApprovalRequest.findUnique({
-      where: { id: itemToEscalate.id },
-    });
-    expect(dbAction?.state).toBe('REJECTED');
-    expect(dbAction?.rejectionReason).toContain('WATCHDOG_ESCALATED');
+    expect(outboxEvents.length).toBeGreaterThanOrEqual(1);
+    const payload = JSON.parse(outboxEvents[0].payloadJson);
+    expect(payload.actionId).toBe(item.id);
+    expect(payload.riskLevel).toBe('LEVEL_1_SAFE_AUTOMATION');
+    expect(payload.recommendedResolution).toBe('RETRY');
+    expect(payload.policyMode).toBe('RISK_BASED');
   });
 });

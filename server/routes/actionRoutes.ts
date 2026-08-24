@@ -213,11 +213,12 @@ router.get('/rollback-history', async (req: Request, res: Response) => {
 // POST /api/actions/watchdog/scan
 router.post('/watchdog/scan', async (req: Request, res: Response) => {
   try {
-    const { executingTimeoutMs, verifyingTimeoutMs, autoResolveStrategy } = req.body || {};
+    const { executingTimeoutMs, verifyingTimeoutMs, policyMode, explicitStrategy } = req.body || {};
     const result = await StuckExecutionWatchdog.scanAndResolveStuckActions({
       executingTimeoutMs,
       verifyingTimeoutMs,
-      autoResolveStrategy,
+      policyMode,
+      explicitStrategy,
     });
     return res.json(result);
   } catch (err: any) {

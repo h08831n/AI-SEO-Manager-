@@ -212,6 +212,7 @@ const fallbackClient: any = {
   website: createInMemoryTable('website'),
   urlIdentity: createInMemoryTable('urlIdentity'),
   seoRecommendation: createInMemoryTable('seoRecommendation'),
+  task: createInMemoryTable('task'),
   seoTask: createInMemoryTable('seoTask'),
   ruleDefinition: createInMemoryTable('ruleDefinition'),
   ruleVersion: createInMemoryTable('ruleVersion'),

@@ -28,7 +28,7 @@ export class ActionWatchdogWorker {
       try {
         console.log(`[action-watchdog-worker] Executing scheduled scan for stuck actions...`);
         const result = await StuckExecutionWatchdog.scanAndResolveStuckActions({
-          autoResolveStrategy: 'NONE', // Scan, record incident, emit ACTION_STUCK_EXECUTION event, and apply recommended strategy
+          policyMode: 'RISK_BASED',
           ...config,
         });
 

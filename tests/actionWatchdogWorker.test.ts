@@ -47,7 +47,7 @@ describe('Action Watchdog Worker Autonomous Lifecycle Suite', () => {
     const workerRuntime = ActionWatchdogWorker.start(5 * 60 * 1000, {
       executingTimeoutMs: 5000,
       verifyingTimeoutMs: 5000,
-      autoResolveStrategy: 'RETRY',
+      policyMode: 'RISK_BASED',
     });
 
     expect(workerRuntime.isRunning()).toBe(true);
