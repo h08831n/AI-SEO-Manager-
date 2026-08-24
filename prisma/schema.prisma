@@ -1504,7 +1504,7 @@ model ActionAttributionFact {
   // Synthetic Control & Causal Estimation
   syntheticControlDelta Float?            // Mean metric delta of matched control cohort
   netCausalLift         Float             // DiD isolated gain
-  outcomeCategory       String            // WIN, LOSS, NEUTRAL
+  outcomeCategory       String            // WIN, LOSS, NEUTRAL, INCONCLUSIVE
   confidenceScore       Float             @default(0.0)
 
   createdAt             DateTime          @default(now())

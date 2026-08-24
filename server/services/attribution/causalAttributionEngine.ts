@@ -9,7 +9,7 @@ export interface AttributionEvaluationResult {
   websiteId: string;
   urlIdentityId: string;
   primaryKeywordId?: string;
-  outcomeCategory: 'WIN' | 'LOSS' | 'NEUTRAL';
+  outcomeCategory: 'WIN' | 'LOSS' | 'NEUTRAL' | 'INCONCLUSIVE';
   confidenceScore: number;
   netCausalLift: number;
   syntheticControlDelta: number;
@@ -160,41 +160,71 @@ export class CausalAttributionEngine {
       syntheticControlDelta = totalControlClickDelta / controlMatches.length;
     }
 
-    // 5. Deterministic Difference-in-Differences Net Lift Calculation
+    // 5. Check for SERP Volatility / Major Algorithm Fluctuations during observation window
+    const serpVolatilityEvents = await prisma.serpSnapshotEvent.findMany({
+      where: {
+        websiteId,
+        createdAt: { gte: executionDate, lte: evaluationEndDate },
+        eventType: { in: ['ALGORITHM_UPDATE_DETECTED', 'SERP_VOLATILITY_SURGE'] as any },
+      },
+    });
+    const isSerpVolatile = serpVolatilityEvents.length > 0;
+
+    // 6. Deterministic Difference-in-Differences Net Lift Calculation
     // Net Lift = Treatment Delta - Synthetic Control Delta
     const netCausalLift = Number((clickLiftDelta - syntheticControlDelta).toFixed(2));
 
-    // 6. Outcome Category Classification & Confidence Calculation
-    let outcomeCategory: 'WIN' | 'LOSS' | 'NEUTRAL' = 'NEUTRAL';
-
-    // Win conditions:
-    // - Significant positive net causal click lift (> +5 clicks or > +10% lift) OR
-    // - Substantial rank improvement (>= +1.5 positions) with non-negative clicks
-    if (netCausalLift >= 5 || (rankDelta >= 1.5 && clickLiftDelta >= 0)) {
-      outcomeCategory = 'WIN';
-    } else if (netCausalLift <= -5 || (rankDelta <= -1.5 && clickLiftDelta < 0)) {
-      outcomeCategory = 'LOSS';
-    } else {
-      outcomeCategory = 'NEUTRAL';
-    }
-
-    // Deterministic Confidence Score (0.0 to 1.0)
+    // 7. Deterministic Confidence Score (0.0 to 1.0)
     // Based on:
     // a. Control twin presence and similarity scores (weight 0.40)
-    // b. Pre-period data density (weight 0.35)
+    // b. Pre-period & post-period data density (weight 0.35)
     // c. Magnitude of metric signal clarity (weight 0.25)
     const avgControlSimilarity =
       controlMatches.length > 0
         ? controlMatches.reduce((sum, m) => sum + m.similarityScore, 0) / controlMatches.length
-        : 0.2;
-    const dataDensityScore = Math.min(1.0, (treatmentPreFacts.length + treatmentPostFacts.length) / 30);
+        : 0.0;
+    const totalFactsCount = treatmentPreFacts.length + treatmentPostFacts.length;
+    const dataDensityScore = Math.min(1.0, totalFactsCount / 30);
     const signalClarityScore = Math.min(1.0, Math.abs(netCausalLift) / 20 + Math.abs(rankDelta) / 5);
 
-    const confidenceScore = Number(
+    let confidenceScore = Number(
       (0.40 * avgControlSimilarity + 0.35 * dataDensityScore + 0.25 * signalClarityScore).toFixed(2)
     );
 
-    // 7. Persist or Update ActionAttributionFact
+    // Apply volatility penalty to confidence score if SERP had turbulent algorithm updates
+    if (isSerpVolatile) {
+      confidenceScore = Number(Math.max(0.1, confidenceScore * 0.5).toFixed(2));
+    }
+
+    // 8. Outcome Category Classification with INCONCLUSIVE & Confidence Thresholds
+    let outcomeCategory: 'WIN' | 'LOSS' | 'NEUTRAL' | 'INCONCLUSIVE' = 'NEUTRAL';
+
+    // Inconclusive conditions:
+    // 1. Observation window is too short (< 14 days)
+    // 2. Insufficient data points (e.g. 0 pre or post facts, or pre impressions = 0 and post impressions = 0)
+    // 3. No viable control twins found (controlMatches.length === 0)
+    // 4. Extreme SERP volatility detected during evaluation window
+    // 5. Confidence score falls below the required threshold for deterministic attribution (threshold: 0.45)
+    const isShortWindow = evaluationHorizonDays < 14;
+    const isInsufficientData = treatmentPreFacts.length === 0 && treatmentPostFacts.length === 0;
+    const isMissingControlGroup = controlMatches.length === 0;
+
+    if (isShortWindow || isInsufficientData || isMissingControlGroup || isSerpVolatile || confidenceScore < 0.45) {
+      outcomeCategory = 'INCONCLUSIVE';
+    } else {
+      // Explicit confidence thresholds required for WIN/LOSS assignment (confidence >= 0.50)
+      const isConfident = confidenceScore >= 0.50;
+
+      if (isConfident && (netCausalLift >= 5 || (rankDelta >= 1.5 && clickLiftDelta >= 0))) {
+        outcomeCategory = 'WIN';
+      } else if (isConfident && (netCausalLift <= -5 || (rankDelta <= -1.5 && clickLiftDelta < 0))) {
+        outcomeCategory = 'LOSS';
+      } else {
+        outcomeCategory = 'NEUTRAL';
+      }
+    }
+
+    // 9. Persist or Update ActionAttributionFact
     const existingFact = await prisma.actionAttributionFact.findUnique({
       where: { actionExecutionId },
     });

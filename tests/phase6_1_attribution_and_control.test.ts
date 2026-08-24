@@ -432,6 +432,281 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
       expect(result.rankDelta).toBe(-10.0);
       expect(result.outcomeCategory).toBe('LOSS');
     });
+
+    it('evaluates INCONCLUSIVE when observation window is too short (< 14 days) or data is insufficient', async () => {
+      const inconcWebsiteId = 'site-attr-inconc-01';
+      await prisma.website.upsert({
+        where: { id: inconcWebsiteId },
+        update: { domain: 'acme-analytics.io' },
+        create: {
+          id: inconcWebsiteId,
+          workspaceId: 'ws-attr-default',
+          productionUrl: 'https://acme-analytics.io',
+          domain: 'acme-analytics.io',
+          name: 'Acme Analytics Corp',
+        },
+      });
+
+      const execDate = new Date('2026-05-01T00:00:00Z');
+
+      const treatUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: inconcWebsiteId,
+          normalizedUrl: 'https://acme-analytics.io/product/new-draft',
+          pathname: '/product/new-draft',
+        },
+      });
+
+      const exec = await prisma.actionExecution.create({
+        data: {
+          websiteId: inconcWebsiteId,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: treatUrl.normalizedUrl,
+          idempotencyKey: `inconc-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: execDate,
+          verifiedAt: execDate,
+        },
+      });
+
+      // Window is 7 days (< 14 days minimum requirement)
+      const shortWindowResult = await CausalAttributionEngine.evaluateActionExecution(exec.id, 7);
+      expect(shortWindowResult.outcomeCategory).toBe('INCONCLUSIVE');
+
+      const savedFact = await prisma.actionAttributionFact.findUnique({
+        where: { actionExecutionId: exec.id },
+      });
+      expect(savedFact?.outcomeCategory).toBe('INCONCLUSIVE');
+    });
+
+    it('evaluates INCONCLUSIVE when SERP volatility update is detected during the evaluation window', async () => {
+      const volatileWebsiteId = 'site-attr-vol-01';
+      await prisma.website.upsert({
+        where: { id: volatileWebsiteId },
+        update: { domain: 'acme-analytics.io' },
+        create: {
+          id: volatileWebsiteId,
+          workspaceId: 'ws-attr-default',
+          productionUrl: 'https://acme-analytics.io',
+          domain: 'acme-analytics.io',
+          name: 'Acme Analytics Corp',
+        },
+      });
+
+      const execDate = new Date('2026-05-01T00:00:00Z');
+
+      const treatUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: volatileWebsiteId,
+          normalizedUrl: 'https://acme-analytics.io/product/volatile-page',
+          pathname: '/product/volatile-page',
+        },
+      });
+
+      const kw = await prisma.keywordUniverse.create({
+        data: {
+          websiteId: volatileWebsiteId,
+          keyword: 'volatile analytics keyword',
+          normalizedKeyword: 'volatile analytics keyword',
+        },
+      });
+
+      const exec = await prisma.actionExecution.create({
+        data: {
+          websiteId: volatileWebsiteId,
+          actionType: 'CONTENT_EXPANSION',
+          targetUrl: treatUrl.normalizedUrl,
+          idempotencyKey: `vol-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: execDate,
+          verifiedAt: execDate,
+        },
+      });
+
+      // Inject SERP Volatility event
+      await prisma.serpSnapshotEvent.create({
+        data: {
+          websiteId: volatileWebsiteId,
+          keywordId: kw.id,
+          eventType: 'ALGORITHM_UPDATE_DETECTED' as any,
+          severity: 'CRITICAL',
+          description: 'Major Google Core Algorithm Update roll-out',
+          metadataJson: JSON.stringify({ impact: 'HIGH_TURBULENCE' }),
+          createdAt: new Date('2026-05-15T00:00:00Z'),
+        },
+      });
+
+      const result = await CausalAttributionEngine.evaluateActionExecution(exec.id, 30);
+      expect(result.outcomeCategory).toBe('INCONCLUSIVE');
+    });
+  });
+
+  describe('5. End-to-End Lineage & Bayesian Learning Input Compatibility', () => {
+    it('verifies ActionExecution -> SeoEvent -> AttributionFact -> Bayesian learning input compatibility', async () => {
+      const e2eWebsiteId = 'site-attr-e2e-bayesian';
+      await prisma.website.upsert({
+        where: { id: e2eWebsiteId },
+        update: { domain: 'acme-e2e.io' },
+        create: {
+          id: e2eWebsiteId,
+          workspaceId: 'ws-attr-default',
+          productionUrl: 'https://acme-e2e.io',
+          domain: 'acme-e2e.io',
+          name: 'Acme E2E Learning Corp',
+        },
+      });
+
+      const execDate = new Date('2026-05-01T00:00:00Z');
+
+      // 1. URL and Primary Keyword
+      const pageUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          normalizedUrl: 'https://acme-e2e.io/features/bayesian-modeling',
+          pathname: '/features/bayesian-modeling',
+        },
+      });
+
+      const kw = await prisma.keywordUniverse.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          keyword: 'bayesian seo modeling',
+          normalizedKeyword: 'bayesian seo modeling',
+          targetUrlIdentityId: pageUrl.id,
+        },
+      });
+
+      // 2. Control twin for synthetic control matching
+      const ctrlUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          normalizedUrl: 'https://acme-e2e.io/features/linear-modeling',
+          pathname: '/features/linear-modeling',
+        },
+      });
+
+      // 3. Create SeoEvent (Action Applied)
+      const seoEvent = await prisma.seoEvent.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          eventType: 'ACTION_APPLIED',
+          entityType: 'URL',
+          entityId: pageUrl.id,
+          source: 'ACTION_ENGINE',
+          severity: 'INFO',
+          eventDate: execDate,
+          deltaNotes: 'Applied Schema Markup Injection',
+          details: JSON.stringify({ actionType: 'STRUCTURED_DATA_INJECTION', ruleKey: 'RULE_SCHEMA_PRODUCT' }),
+        },
+      });
+
+      // 4. Create Recommendation and ActionExecution linked to SeoEvent
+      const rec = await prisma.seoRecommendation.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          ruleKey: 'RULE_SCHEMA_PRODUCT',
+          title: 'Inject Product Schema',
+          targetUrl: pageUrl.normalizedUrl,
+          status: 'APPLIED',
+        },
+      });
+
+      const actionExec = await prisma.actionExecution.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          actionType: 'STRUCTURED_DATA_INJECTION',
+          recommendationId: rec.id,
+          targetUrl: pageUrl.normalizedUrl,
+          idempotencyKey: `e2e-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: execDate,
+          verifiedAt: execDate,
+          seoEventId: seoEvent.id,
+        },
+      });
+
+      // 5. Pre & Post GSC analytics facts
+      await prisma.gscSearchAnalyticsFact.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          urlIdentityId: pageUrl.id,
+          date: new Date('2026-04-10T00:00:00Z'),
+          clicks: 50,
+          impressions: 1000,
+          position: 12.0,
+        },
+      });
+      await prisma.gscSearchAnalyticsFact.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          urlIdentityId: pageUrl.id,
+          date: new Date('2026-05-20T00:00:00Z'),
+          clicks: 180,
+          impressions: 2500,
+          position: 6.0,
+        },
+      });
+
+      // Control facts
+      await prisma.gscSearchAnalyticsFact.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          urlIdentityId: ctrlUrl.id,
+          date: new Date('2026-04-10T00:00:00Z'),
+          clicks: 40,
+          impressions: 900,
+          position: 14.0,
+        },
+      });
+      await prisma.gscSearchAnalyticsFact.create({
+        data: {
+          websiteId: e2eWebsiteId,
+          urlIdentityId: ctrlUrl.id,
+          date: new Date('2026-05-20T00:00:00Z'),
+          clicks: 45,
+          impressions: 950,
+          position: 14.0,
+        },
+      });
+
+      // 6. Execute Causal Attribution Engine
+      const evalResult = await CausalAttributionEngine.evaluateActionExecution(actionExec.id, 30);
+      expect(evalResult.outcomeCategory).toBe('WIN');
+      expect(evalResult.confidenceScore).toBeGreaterThanOrEqual(0.50);
+
+      // 7. Verify ActionAttributionFact was created and links back to SeoEvent
+      const attributionFact = await prisma.actionAttributionFact.findUnique({
+        where: { actionExecutionId: actionExec.id },
+        include: {
+          seoEvent: true,
+          actionExecution: true,
+          urlIdentity: true,
+        },
+      });
+
+      expect(attributionFact).toBeDefined();
+      expect(attributionFact?.seoEventId).toBe(seoEvent.id);
+      expect(attributionFact?.ruleKey).toBe('RULE_SCHEMA_PRODUCT');
+      expect(attributionFact?.outcomeCategory).toBe('WIN');
+
+      // 8. Validate compatibility with Phase 6.2 Bayesian Learning inputs
+      // Phase 6.2 consumes (websiteId, ruleKey, cmsProvider, pageArchetype, outcomeCategory, confidenceScore)
+      const bayesianInputPayload = {
+        websiteId: attributionFact!.websiteId,
+        ruleKey: attributionFact!.ruleKey,
+        cmsProvider: attributionFact!.cmsProvider,
+        pageArchetype: attributionFact!.pageArchetype,
+        outcome: attributionFact!.outcomeCategory as 'WIN' | 'LOSS' | 'NEUTRAL' | 'INCONCLUSIVE',
+        confidenceScore: attributionFact!.confidenceScore,
+        netCausalLift: attributionFact!.netCausalLift,
+      };
+
+      expect(bayesianInputPayload.websiteId).toBe(e2eWebsiteId);
+      expect(bayesianInputPayload.ruleKey).toBe('RULE_SCHEMA_PRODUCT');
+      expect(['WIN', 'LOSS', 'NEUTRAL', 'INCONCLUSIVE']).toContain(bayesianInputPayload.outcome);
+      expect(typeof bayesianInputPayload.confidenceScore).toBe('number');
+      expect(bayesianInputPayload.confidenceScore).toBeGreaterThan(0);
+    });
   });
 
   describe('4. Event-Driven Outbox & Worker Lifecycle', () => {

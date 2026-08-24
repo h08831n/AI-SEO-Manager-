@@ -64,9 +64,24 @@ export class AttributionLineageService {
       throw new Error(`ActionExecution '${actionExecutionId}' not found for lineage resolution.`);
     }
 
+    // Resolve recommendation explicitly if not populated in mock/runtime
+    let recommendation = execution.recommendation;
+    if (!recommendation && execution.recommendationId) {
+      recommendation = await prisma.seoRecommendation.findUnique({
+        where: { id: execution.recommendationId },
+      });
+    }
+
+    let task = execution.task;
+    if (!task && execution.taskId) {
+      task = await prisma.seoTask.findUnique({
+        where: { id: execution.taskId },
+      });
+    }
+
     const { websiteId, targetUrl, actionType } = execution;
     const { normalizedUrl, pathname } = this.normalizeUrl(targetUrl);
-    const ruleKey = execution.recommendation?.ruleKey || execution.task?.category || actionType;
+    const ruleKey = recommendation?.ruleKey || task?.category || actionType;
     const pageArchetype = this.derivePageArchetype(pathname);
 
     // 1. Resolve or match UrlIdentity
@@ -140,36 +155,42 @@ export class AttributionLineageService {
       }
     }
 
-    // 3. Integrate with SeoEvent timeline: find or create SeoEvent for this ActionExecution
-    const eventFingerprint = `action_exec:${execution.id}`;
-    let seoEvent = await prisma.seoEvent.findFirst({
-      where: { websiteId, eventFingerprint },
-    });
+    // 3. Integrate with SeoEvent timeline: check if already linked or find/create SeoEvent
+    let seoEvent = execution.seoEventId
+      ? await prisma.seoEvent.findUnique({ where: { id: execution.seoEventId } })
+      : null;
 
     if (!seoEvent) {
-      seoEvent = await prisma.seoEvent.create({
-        data: {
-          websiteId,
-          eventType: 'ACTION_VERIFIED_COMPLETED',
-          entityType: 'URL',
-          entityUrl: targetUrl,
-          beforeValue: execution.beforeEvidenceJson || null,
-          afterValue: execution.afterEvidenceJson || null,
-          deltaNotes: `Action ${actionType} verified on ${targetUrl}. Primed for attribution lag tracking.`,
-          details: JSON.stringify({
-            actionExecutionId: execution.id,
-            ruleKey,
-            pageArchetype,
-            primaryKeywordId: primaryKeyword?.id || null,
-            primaryKeywordText: primaryKeyword?.keyword || null,
-          }),
-          severity: 'INFO',
-          source: 'ACTION_ORCHESTRATOR',
-          provenance: 'MEASURED_PROVIDER',
-          eventFingerprint,
-          detectedAt: execution.verifiedAt || execution.executedAt || new Date(),
-        },
+      const eventFingerprint = `action_exec:${execution.id}`;
+      seoEvent = await prisma.seoEvent.findFirst({
+        where: { websiteId, eventFingerprint },
       });
+
+      if (!seoEvent) {
+        seoEvent = await prisma.seoEvent.create({
+          data: {
+            websiteId,
+            eventType: 'ACTION_VERIFIED_COMPLETED',
+            entityType: 'URL',
+            entityUrl: targetUrl,
+            beforeValue: execution.beforeEvidenceJson || null,
+            afterValue: execution.afterEvidenceJson || null,
+            deltaNotes: `Action ${actionType} verified on ${targetUrl}. Primed for attribution lag tracking.`,
+            details: JSON.stringify({
+              actionExecutionId: execution.id,
+              ruleKey,
+              pageArchetype,
+              primaryKeywordId: primaryKeyword?.id || null,
+              primaryKeywordText: primaryKeyword?.keyword || null,
+            }),
+            severity: 'INFO',
+            source: 'ACTION_ORCHESTRATOR',
+            provenance: 'MEASURED_PROVIDER',
+            eventFingerprint,
+            detectedAt: execution.verifiedAt || execution.executedAt || new Date(),
+          },
+        });
+      }
     }
 
     // CMS Provider detection (defaulting to custom API / detected platform)
