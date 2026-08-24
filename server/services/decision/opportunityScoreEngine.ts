@@ -66,6 +66,7 @@ export class OpportunityScoreEngine {
     confidenceScore: number; // 0.1 to 1.0
     effortScore: number; // 1.0 to 5.0
     riskScore: number; // 1.0 to 5.0
+    ruleWeight?: number; // 0.2 to 2.5 (Bayesian multiplier)
   }): OpportunityScoreBreakdown {
     const potentialTrafficGain = Math.min(10.0, Math.max(1.0, params.potentialTrafficGain));
     const businessValueWeight =
@@ -76,8 +77,9 @@ export class OpportunityScoreEngine {
     const confidenceScore = Math.min(1.0, Math.max(0.1, params.confidenceScore));
     const effortWeight = Math.min(5.0, Math.max(1.0, params.effortScore));
     const riskWeight = Math.min(5.0, Math.max(1.0, params.riskScore));
+    const ruleWeight = params.ruleWeight !== undefined ? Math.max(0.1, params.ruleWeight) : 1.0;
 
-    const numerator = potentialTrafficGain * businessValueWeight * confidenceScore;
+    const numerator = potentialTrafficGain * businessValueWeight * confidenceScore * ruleWeight;
     const denominator = effortWeight * riskWeight;
     const rawScore = (numerator / denominator) * 10.0;
     const score = Number(Math.min(100.0, Math.max(1.0, rawScore)).toFixed(1));
@@ -93,7 +95,7 @@ export class OpportunityScoreEngine {
       priority = 'P3_LOW';
     }
 
-    const formulaDetails = `(${potentialTrafficGain} * ${businessValueWeight} * ${confidenceScore}) / (${effortWeight} * ${riskWeight}) * 10 = ${score}`;
+    const formulaDetails = `(${potentialTrafficGain} * ${businessValueWeight} * ${confidenceScore}${ruleWeight !== 1.0 ? ` * ${ruleWeight}` : ''}) / (${effortWeight} * ${riskWeight}) * 10 = ${score}`;
 
     return {
       score,
@@ -103,6 +105,7 @@ export class OpportunityScoreEngine {
       confidenceScore,
       effortWeight,
       riskWeight,
+      ruleWeight,
       formulaDetails,
     };
   }

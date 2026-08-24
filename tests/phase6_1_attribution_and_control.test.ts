@@ -1183,5 +1183,121 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
       });
       expect(facts.length).toBe(2);
     });
+
+    it('executes Bayesian aggregation queries efficiently using index access paths', async () => {
+      const siteId = 'site-bayesian-agg-indexes';
+      await prisma.website.upsert({
+        where: { id: siteId },
+        update: {},
+        create: {
+          id: siteId,
+          workspaceId: 'ws-bayesian-indexes',
+          productionUrl: 'https://bayesian-indexes.io',
+          domain: 'bayesian-indexes.io',
+          name: 'Bayesian Indexes Corp',
+        },
+      });
+
+      const now = new Date('2026-06-01T00:00:00Z');
+      const pastDate = new Date('2026-05-15T00:00:00Z');
+
+      const url = await prisma.urlIdentity.create({
+        data: {
+          websiteId: siteId,
+          normalizedUrl: 'https://bayesian-indexes.io/docs',
+          pathname: '/docs',
+        },
+      });
+
+      const exec = await prisma.actionExecution.create({
+        data: {
+          websiteId: siteId,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: url.normalizedUrl,
+          idempotencyKey: `bayesian-agg-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: pastDate,
+          verifiedAt: pastDate,
+        },
+      });
+
+      // Insert 2 facts
+      await prisma.actionAttributionFact.createMany({
+        data: [
+          {
+            websiteId: siteId,
+            actionExecutionId: exec.id,
+            evaluationKey: `eval-agg-1-${Date.now()}`,
+            urlIdentityId: url.id,
+            ruleKey: 'RULE_TITLE_TAG',
+            modelVersion: 'causal-did-v1',
+            cmsProvider: 'CUSTOM',
+            executionDate: pastDate,
+            baselineStartDate: new Date('2026-04-01T00:00:00Z'),
+            evaluationStartDate: pastDate,
+            evaluationEndDate: now,
+            preAvgRank: 12.0,
+            postAvgRank: 8.0,
+            rankDelta: 4.0,
+            preClicks30d: 100,
+            postClicks30d: 150,
+            clickLiftDelta: 50,
+            netCausalLift: 40.0,
+            outcomeCategory: 'WIN',
+            confidenceScore: 0.85,
+          },
+          {
+            websiteId: siteId,
+            actionExecutionId: exec.id,
+            evaluationKey: `eval-agg-2-${Date.now()}`,
+            urlIdentityId: url.id,
+            ruleKey: 'RULE_TITLE_TAG',
+            modelVersion: 'causal-did-v1',
+            cmsProvider: 'CUSTOM',
+            executionDate: pastDate,
+            baselineStartDate: new Date('2026-04-01T00:00:00Z'),
+            evaluationStartDate: pastDate,
+            evaluationEndDate: now,
+            preAvgRank: 15.0,
+            postAvgRank: 18.0,
+            rankDelta: -3.0,
+            preClicks30d: 100,
+            postClicks30d: 80,
+            clickLiftDelta: -20,
+            netCausalLift: -25.0,
+            outcomeCategory: 'LOSS',
+            confidenceScore: 0.75,
+          },
+        ],
+      });
+
+      // 1. Query path: [websiteId, ruleKey, outcomeCategory]
+      const siteRuleWins = await prisma.actionAttributionFact.findMany({
+        where: {
+          websiteId: siteId,
+          ruleKey: 'RULE_TITLE_TAG',
+          outcomeCategory: 'WIN',
+        },
+      });
+      expect(siteRuleWins.length).toBe(1);
+      expect(siteRuleWins[0].outcomeCategory).toBe('WIN');
+
+      // 2. Query path: [ruleKey, modelVersion]
+      const ruleModelFacts = await prisma.actionAttributionFact.findMany({
+        where: {
+          ruleKey: 'RULE_TITLE_TAG',
+          modelVersion: 'causal-did-v1',
+        },
+      });
+      expect(ruleModelFacts.length).toBeGreaterThanOrEqual(2);
+
+      // 3. Query path: [evaluationEndDate]
+      const closedWindowFacts = await prisma.actionAttributionFact.findMany({
+        where: {
+          evaluationEndDate: { lte: new Date('2026-06-02T00:00:00Z') },
+        },
+      });
+      expect(closedWindowFacts.length).toBeGreaterThanOrEqual(2);
+    });
   });
 });

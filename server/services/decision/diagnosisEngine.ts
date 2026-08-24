@@ -6,8 +6,12 @@ import { ActionStatus } from '@prisma/client';
 export class DiagnosisEngine {
   /**
    * Evaluates problem contexts against the rule catalog and produces prioritized ScoredOpportunities.
+   * Supports optional Bayesian rule weight multipliers to modulate opportunity prioritization.
    */
-  public static evaluateContexts(contexts: ProblemContext[]): ScoredOpportunity[] {
+  public static evaluateContexts(
+    contexts: ProblemContext[],
+    options?: { ruleWeights?: Record<string, number> }
+  ): ScoredOpportunity[] {
     const rules = DiagnosisRuleCatalog.getAllRules();
     const scoredOpportunities: ScoredOpportunity[] = [];
 
@@ -16,14 +20,16 @@ export class DiagnosisEngine {
         if (rule.applies(ctx)) {
           const diagnosis: DiagnosisResult | null = rule.diagnose(ctx);
           if (diagnosis) {
-            // Calculate Opportunity Score
+            // Calculate Opportunity Score with optional Bayesian rule weight
             const businessValueTier = ctx.keywordContext?.businessValue;
+            const ruleWeight = options?.ruleWeights?.[rule.id] ?? options?.ruleWeights?.[diagnosis.ruleKey] ?? 1.0;
             const scoring = OpportunityScoreEngine.calculateScore({
               potentialTrafficGain: diagnosis.potentialTrafficGain,
               businessValueTier,
               confidenceScore: diagnosis.confidence,
               effortScore: diagnosis.baseEffort,
               riskScore: diagnosis.baseRisk,
+              ruleWeight,
             });
 
             const oppId = `opp-${rule.id.toLowerCase()}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;

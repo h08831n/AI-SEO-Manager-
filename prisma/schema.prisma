@@ -1520,7 +1520,9 @@ model ActionAttributionFact {
   syntheticControls     SyntheticControlMatch[]
 
   @@index([actionExecutionId])
-  @@index([websiteId, ruleKey])
+  @@index([websiteId, ruleKey, outcomeCategory])
+  @@index([ruleKey, modelVersion])
+  @@index([evaluationEndDate])
   @@index([outcomeCategory])
   @@index([executionDate])
   @@index([seoEventId])

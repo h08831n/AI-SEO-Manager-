@@ -100,6 +100,7 @@ export interface OpportunityScoreBreakdown {
   confidenceScore: number;
   effortWeight: number;
   riskWeight: number;
+  ruleWeight?: number;
   formulaDetails: string;
 }
 
