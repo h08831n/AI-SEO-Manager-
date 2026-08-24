@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS "action_attribution_facts" (
     "id" TEXT NOT NULL,
     "websiteId" TEXT NOT NULL,
     "actionExecutionId" TEXT NOT NULL,
+    "evaluationKey" TEXT,
     "urlIdentityId" TEXT NOT NULL,
     "primaryKeywordId" TEXT,
     "seoEventId" TEXT,
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS "bayesian_rule_weight_state" (
 
 -- CreateIndexes
 CREATE UNIQUE INDEX IF NOT EXISTS "action_attribution_facts_actionExecutionId_key" ON "action_attribution_facts"("actionExecutionId");
+CREATE UNIQUE INDEX IF NOT EXISTS "action_attribution_facts_evaluationKey_key" ON "action_attribution_facts"("evaluationKey");
 CREATE INDEX IF NOT EXISTS "action_attribution_facts_websiteId_ruleKey_idx" ON "action_attribution_facts"("websiteId", "ruleKey");
 CREATE INDEX IF NOT EXISTS "action_attribution_facts_outcomeCategory_idx" ON "action_attribution_facts"("outcomeCategory");
 CREATE INDEX IF NOT EXISTS "action_attribution_facts_executionDate_idx" ON "action_attribution_facts"("executionDate");

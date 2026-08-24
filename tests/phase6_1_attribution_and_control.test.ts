@@ -6,6 +6,7 @@ import { CausalAttributionEngine } from '../server/services/attribution/causalAt
 import { AttributionEvaluationWorker } from '../server/services/worker/attributionEvaluationWorker';
 import { AttributionQueueProducer } from '../server/queues/attributionQueueProducer';
 import { OutboxDispatcher } from '../server/services/outbox/outboxDispatcher';
+import { BayesianInputBoundary } from '../server/services/bayesian/bayesianInputBoundary';
 import { ActionStatus } from '@prisma/client';
 
 describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', () => {
@@ -591,10 +592,10 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
           websiteId: e2eWebsiteId,
           eventType: 'ACTION_APPLIED',
           entityType: 'URL',
-          entityId: pageUrl.id,
+          entityUrl: pageUrl.normalizedUrl,
           source: 'ACTION_ENGINE',
           severity: 'INFO',
-          eventDate: execDate,
+          eventFingerprint: `e2e_event_${Date.now()}`,
           deltaNotes: 'Applied Schema Markup Injection',
           details: JSON.stringify({ actionType: 'STRUCTURED_DATA_INJECTION', ruleKey: 'RULE_SCHEMA_PRODUCT' }),
         },
@@ -606,8 +607,11 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
           websiteId: e2eWebsiteId,
           ruleKey: 'RULE_SCHEMA_PRODUCT',
           title: 'Inject Product Schema',
-          targetUrl: pageUrl.normalizedUrl,
-          status: 'APPLIED',
+          category: 'STRUCTURED_DATA',
+          actionType: 'STRUCTURED_DATA_INJECTION',
+          evidence: 'Missing schema on product',
+          source: 'AUDIT',
+          status: ActionStatus.VERIFIED_COMPLETED,
         },
       });
 
@@ -622,7 +626,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
           executedAt: execDate,
           verifiedAt: execDate,
           seoEventId: seoEvent.id,
-        },
+        } as any,
       });
 
       // 5. Pre & Post GSC analytics facts
@@ -758,6 +762,269 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
 
       const foundResult = batchRes.results.find(r => r.actionExecutionId === matureExec.id);
       expect(foundResult).toBeDefined();
+    });
+  });
+
+  describe('6. Attribution Idempotency & Bayesian Input Boundary Safeguards', () => {
+    it('enforces attribution evaluation idempotency across duplicate worker executions', async () => {
+      const idempSiteId = 'site-attr-idemp-01';
+      await prisma.website.upsert({
+        where: { id: idempSiteId },
+        update: { domain: 'acme-idemp.io' },
+        create: {
+          id: idempSiteId,
+          workspaceId: 'ws-attr-default',
+          productionUrl: 'https://acme-idemp.io',
+          domain: 'acme-idemp.io',
+          name: 'Acme Idempotency Corp',
+        },
+      });
+
+      const execDate = new Date('2026-05-01T00:00:00Z');
+
+      const treatUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: idempSiteId,
+          normalizedUrl: 'https://acme-idemp.io/product/idemp-page',
+          pathname: '/product/idemp-page',
+        },
+      });
+
+      const exec = await prisma.actionExecution.create({
+        data: {
+          websiteId: idempSiteId,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: treatUrl.normalizedUrl,
+          idempotencyKey: `idemp-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: execDate,
+          verifiedAt: execDate,
+        },
+      });
+
+      // 1st Execution via Worker
+      const eval1 = await AttributionEvaluationWorker.evaluateSingleExecution(exec.id, 30);
+      expect(eval1.attributionFactId).toBeDefined();
+      expect(eval1.evaluationKey).toBeDefined();
+
+      const totalFacts1 = await prisma.actionAttributionFact.count({
+        where: { actionExecutionId: exec.id },
+      });
+      expect(totalFacts1).toBe(1);
+
+      // 2nd Duplicate Execution via Worker (Retry scenario)
+      const eval2 = await AttributionEvaluationWorker.evaluateSingleExecution(exec.id, 30);
+      expect(eval2.attributionFactId).toBe(eval1.attributionFactId);
+      expect(eval2.evaluationKey).toBe(eval1.evaluationKey);
+
+      // 3rd Duplicate Direct Execution via Engine
+      const eval3 = await CausalAttributionEngine.evaluateActionExecution(exec.id, 30);
+      expect(eval3.attributionFactId).toBe(eval1.attributionFactId);
+
+      const totalFactsFinal = await prisma.actionAttributionFact.count({
+        where: { actionExecutionId: exec.id },
+      });
+      // Guarantees zero duplicate ActionAttributionFact rows created
+      expect(totalFactsFinal).toBe(1);
+    });
+
+    it('strictly ignores low-confidence attribution facts in Bayesian input boundary', async () => {
+      const completedPastDate = new Date('2026-05-30T00:00:00Z');
+      const now = new Date('2026-06-01T00:00:00Z');
+
+      // Low confidence WIN (0.35 < 0.50)
+      const lowConfidenceFact = {
+        attributionFactId: 'fact-low-conf-1',
+        websiteId: 'site-attr-test-01',
+        actionExecutionId: 'exec-1',
+        ruleKey: 'RULE_TITLE_OPTIMIZATION',
+        outcomeCategory: 'WIN',
+        confidenceScore: 0.35,
+        evaluationEndDate: completedPastDate,
+      };
+
+      expect(
+        BayesianInputBoundary.isEligibleForBayesianLearning(lowConfidenceFact, { now })
+      ).toBe(false);
+
+      // High confidence WIN (0.85 >= 0.50)
+      const highConfidenceFact = {
+        attributionFactId: 'fact-high-conf-1',
+        websiteId: 'site-attr-test-01',
+        actionExecutionId: 'exec-2',
+        ruleKey: 'RULE_TITLE_OPTIMIZATION',
+        outcomeCategory: 'WIN',
+        confidenceScore: 0.85,
+        evaluationEndDate: completedPastDate,
+      };
+
+      expect(
+        BayesianInputBoundary.isEligibleForBayesianLearning(highConfidenceFact, { now })
+      ).toBe(true);
+
+      const filtered = BayesianInputBoundary.filterEligibleAttributionFacts(
+        [lowConfidenceFact, highConfidenceFact],
+        { now }
+      );
+      expect(filtered.length).toBe(1);
+      expect(filtered[0].attributionFactId).toBe('fact-high-conf-1');
+      expect(filtered[0].confidenceScore).toBe(0.85);
+    });
+
+    it('strictly excludes INCONCLUSIVE and NEUTRAL outcomes from Bayesian learning pipeline', async () => {
+      const completedPastDate = new Date('2026-05-30T00:00:00Z');
+      const now = new Date('2026-06-01T00:00:00Z');
+
+      const inconclusiveFact = {
+        attributionFactId: 'fact-inconc-1',
+        websiteId: 'site-attr-test-01',
+        actionExecutionId: 'exec-inconc-1',
+        ruleKey: 'RULE_META_DESCRIPTION',
+        outcomeCategory: 'INCONCLUSIVE',
+        confidenceScore: 0.95, // High confidence in inconclusive/turbulent data
+        evaluationEndDate: completedPastDate,
+      };
+
+      const neutralFact = {
+        attributionFactId: 'fact-neutral-1',
+        websiteId: 'site-attr-test-01',
+        actionExecutionId: 'exec-neutral-1',
+        ruleKey: 'RULE_META_DESCRIPTION',
+        outcomeCategory: 'NEUTRAL',
+        confidenceScore: 0.80,
+        evaluationEndDate: completedPastDate,
+      };
+
+      const lossFact = {
+        attributionFactId: 'fact-loss-1',
+        websiteId: 'site-attr-test-01',
+        actionExecutionId: 'exec-loss-1',
+        ruleKey: 'RULE_META_DESCRIPTION',
+        outcomeCategory: 'LOSS',
+        confidenceScore: 0.75,
+        evaluationEndDate: completedPastDate,
+      };
+
+      expect(BayesianInputBoundary.isEligibleForBayesianLearning(inconclusiveFact, { now })).toBe(false);
+      expect(BayesianInputBoundary.isEligibleForBayesianLearning(neutralFact, { now })).toBe(false);
+      expect(BayesianInputBoundary.isEligibleForBayesianLearning(lossFact, { now })).toBe(true);
+
+      const filtered = BayesianInputBoundary.filterEligibleAttributionFacts(
+        [inconclusiveFact, neutralFact, lossFact],
+        { now }
+      );
+      expect(filtered.length).toBe(1);
+      expect(filtered[0].attributionFactId).toBe('fact-loss-1');
+      expect(filtered[0].outcomeCategory).toBe('LOSS');
+    });
+
+    it('strictly excludes incomplete / open evaluation windows from Bayesian learning', async () => {
+      const now = new Date('2026-06-01T00:00:00Z');
+      const futureEndDate = new Date('2026-06-15T00:00:00Z'); // Horizon has not completed yet
+
+      const prematureFact = {
+        attributionFactId: 'fact-premature-1',
+        websiteId: 'site-attr-test-01',
+        actionExecutionId: 'exec-premature-1',
+        ruleKey: 'RULE_SCHEMA_MARKUP',
+        outcomeCategory: 'WIN',
+        confidenceScore: 0.85,
+        evaluationEndDate: futureEndDate,
+      };
+
+      expect(BayesianInputBoundary.isEligibleForBayesianLearning(prematureFact, { now })).toBe(false);
+
+      const filtered = BayesianInputBoundary.filterEligibleAttributionFacts([prematureFact], { now });
+      expect(filtered.length).toBe(0);
+    });
+
+    it('fetches only eligible attribution facts from database query', async () => {
+      const testSite = 'site-boundary-db-01';
+      await prisma.website.upsert({
+        where: { id: testSite },
+        update: { domain: 'boundary-test.io' },
+        create: {
+          id: testSite,
+          workspaceId: 'ws-attr-default',
+          productionUrl: 'https://boundary-test.io',
+          domain: 'boundary-test.io',
+          name: 'Boundary Test Corp',
+        },
+      });
+
+      const pastDate = new Date('2026-05-01T00:00:00Z');
+      const now = new Date('2026-05-20T00:00:00Z');
+
+      const url = await prisma.urlIdentity.create({
+        data: { websiteId: testSite, normalizedUrl: 'https://boundary-test.io/page-1', pathname: '/page-1' },
+      });
+
+      const exec1 = await prisma.actionExecution.create({
+        data: {
+          websiteId: testSite,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: url.normalizedUrl,
+          idempotencyKey: `b-exec-1-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+        },
+      });
+      const exec2 = await prisma.actionExecution.create({
+        data: {
+          websiteId: testSite,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: url.normalizedUrl,
+          idempotencyKey: `b-exec-2-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+        },
+      });
+
+      // Fact 1: Eligible WIN
+      await prisma.actionAttributionFact.create({
+        data: {
+          websiteId: testSite,
+          actionExecutionId: exec1.id,
+          urlIdentityId: url.id,
+          ruleKey: 'RULE_TITLE_TAG',
+          cmsProvider: 'CUSTOM',
+          executionDate: pastDate,
+          baselineStartDate: pastDate,
+          evaluationStartDate: pastDate,
+          evaluationEndDate: new Date('2026-05-15T00:00:00Z'),
+          preAvgRank: 10,
+          postAvgRank: 5,
+          rankDelta: 5,
+          netCausalLift: 12.0,
+          outcomeCategory: 'WIN',
+          confidenceScore: 0.82,
+        },
+      });
+
+      // Fact 2: Ineligible NEUTRAL
+      await prisma.actionAttributionFact.create({
+        data: {
+          websiteId: testSite,
+          actionExecutionId: exec2.id,
+          urlIdentityId: url.id,
+          ruleKey: 'RULE_TITLE_TAG',
+          cmsProvider: 'CUSTOM',
+          executionDate: pastDate,
+          baselineStartDate: pastDate,
+          evaluationStartDate: pastDate,
+          evaluationEndDate: new Date('2026-05-15T00:00:00Z'),
+          preAvgRank: 10,
+          postAvgRank: 10,
+          rankDelta: 0,
+          netCausalLift: 0.0,
+          outcomeCategory: 'NEUTRAL',
+          confidenceScore: 0.82,
+        },
+      });
+
+      const eligibleDbFacts = await BayesianInputBoundary.fetchEligibleAttributionFacts(testSite, { now });
+      expect(eligibleDbFacts.length).toBe(1);
+      expect(eligibleDbFacts[0].actionExecutionId).toBe(exec1.id);
+      expect(eligibleDbFacts[0].outcomeCategory).toBe('WIN');
+      expect(eligibleDbFacts[0].confidenceScore).toBe(0.82);
     });
   });
 });

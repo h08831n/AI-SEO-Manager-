@@ -6,6 +6,7 @@ import { OutboxDispatcher } from '../outbox/outboxDispatcher';
 export interface AttributionEvaluationResult {
   attributionFactId: string;
   actionExecutionId: string;
+  evaluationKey?: string;
   websiteId: string;
   urlIdentityId: string;
   primaryKeywordId?: string;
@@ -224,16 +225,24 @@ export class CausalAttributionEngine {
       }
     }
 
-    // 9. Persist or Update ActionAttributionFact
-    const existingFact = await prisma.actionAttributionFact.findUnique({
-      where: { actionExecutionId },
-    });
+    // 9. Generate Deterministic Evaluation Key for Idempotency
+    const evaluationKey = `eval:${actionExecutionId}:w${evaluationHorizonDays}d:${evaluationStartDate.toISOString().slice(0, 10)}_${evaluationEndDate.toISOString().slice(0, 10)}`;
+
+    // 10. Persist or Update ActionAttributionFact (Idempotent upsert logic)
+    const existingFact =
+      (await prisma.actionAttributionFact.findUnique({
+        where: { actionExecutionId },
+      })) ||
+      (await prisma.actionAttributionFact.findUnique({
+        where: { evaluationKey } as any,
+      }));
 
     let attributionFact;
     if (existingFact) {
       attributionFact = await prisma.actionAttributionFact.update({
         where: { id: existingFact.id },
         data: {
+          evaluationKey,
           primaryKeywordId: primaryKeywordId || null,
           seoEventId: seoEventId || null,
           ruleKey,
@@ -266,6 +275,7 @@ export class CausalAttributionEngine {
         data: {
           websiteId,
           actionExecutionId,
+          evaluationKey,
           urlIdentityId,
           primaryKeywordId: primaryKeywordId || null,
           seoEventId: seoEventId || null,
@@ -296,7 +306,7 @@ export class CausalAttributionEngine {
       });
     }
 
-    // 8. Persist control twin matches linked to this attribution fact
+    // 11. Persist control twin matches linked to this attribution fact
     await SyntheticControlEngine.persistControlMatches(
       websiteId,
       urlIdentityId,
@@ -304,7 +314,7 @@ export class CausalAttributionEngine {
       attributionFact.id
     );
 
-    // 9. Update SeoEvent timeline with attribution results
+    // 12. Update SeoEvent timeline with attribution results
     if (seoEventId) {
       await prisma.seoEvent.update({
         where: { id: seoEventId },
@@ -315,6 +325,7 @@ export class CausalAttributionEngine {
           details: JSON.stringify({
             attributionFactId: attributionFact.id,
             actionExecutionId,
+            evaluationKey,
             outcomeCategory,
             netCausalLift,
             rankDelta,
@@ -327,7 +338,7 @@ export class CausalAttributionEngine {
       });
     }
 
-    // 10. Emit Outbox Event for downstream Bayesian learning and canary watchdogs
+    // 13. Emit Outbox Event for downstream Bayesian learning and canary watchdogs
     await OutboxDispatcher.recordEvent({
       aggregateType: 'ATTRIBUTION_FACT',
       aggregateId: attributionFact.id,
@@ -335,6 +346,7 @@ export class CausalAttributionEngine {
       payload: {
         attributionFactId: attributionFact.id,
         actionExecutionId,
+        evaluationKey,
         websiteId,
         ruleKey,
         cmsProvider,
@@ -343,12 +355,14 @@ export class CausalAttributionEngine {
         netCausalLift,
         rankDelta,
         confidenceScore,
+        evaluationEndDate: evaluationEndDate.toISOString(),
       },
     });
 
     return {
       attributionFactId: attributionFact.id,
       actionExecutionId,
+      evaluationKey,
       websiteId,
       urlIdentityId,
       primaryKeywordId: primaryKeywordId || undefined,

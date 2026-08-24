@@ -156,8 +156,8 @@ export class AttributionLineageService {
     }
 
     // 3. Integrate with SeoEvent timeline: check if already linked or find/create SeoEvent
-    let seoEvent = execution.seoEventId
-      ? await prisma.seoEvent.findUnique({ where: { id: execution.seoEventId } })
+    let seoEvent = (execution as any).seoEventId
+      ? await prisma.seoEvent.findUnique({ where: { id: (execution as any).seoEventId } })
       : null;
 
     if (!seoEvent) {
