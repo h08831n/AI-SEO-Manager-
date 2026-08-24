@@ -4,7 +4,8 @@ export class RedisConnectionFactory {
   private static client: IORedis | null = null;
 
   public static createClient(): IORedis {
-    if (process.env.REDIS_URL && process.env.NODE_ENV !== 'test') {
+    const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
+    if (process.env.REDIS_URL && !isTest) {
       const client = new IORedis(process.env.REDIS_URL, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,

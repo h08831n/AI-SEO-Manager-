@@ -191,6 +191,9 @@ model Website {
   actionApprovalRequests ActionApprovalRequest[]
   auditLogs        AuditLog[]
   jobRuns          JobRun[]
+  attributionFacts ActionAttributionFact[]
+  syntheticControlMatches SyntheticControlMatch[]
+  bayesianRuleWeightStates BayesianRuleWeightState[]
 
   @@unique([workspaceId, domain])
   @@index([workspaceId])
@@ -362,6 +365,9 @@ model UrlIdentity {
   website           Website                  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   gscFacts          GscSearchAnalyticsFact[]
   ga4LandingPages   Ga4LandingPageDaily[]
+  treatmentControlMatches SyntheticControlMatch[]    @relation("TreatmentUrlRelation")
+  controlTwinMatches SyntheticControlMatch[]       @relation("ControlUrlRelation")
+  attributionFacts  ActionAttributionFact[]
 
   @@unique([websiteId, normalizedUrl])
   @@index([websiteId, isOrphanCandidate])
@@ -557,6 +563,7 @@ model SeoEvent {
 
   website          Website   @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   crawlRun         CrawlRun? @relation(fields: [crawlRunId], references: [id], onDelete: SetNull)
+  attributionFacts ActionAttributionFact[]
 
   @@unique([websiteId, eventFingerprint])
   @@index([websiteId, detectedAt])
@@ -888,6 +895,7 @@ model ActionExecution {
   verifications       ActionVerification[]
   preStateSnapshots   ActionPreStateSnapshot[]
   rollbackHistories   RollbackExecutionHistory[]
+  attributionFact     ActionAttributionFact?
 
   @@index([websiteId, state])
   @@index([idempotencyKey])
@@ -1223,6 +1231,7 @@ model KeywordUniverse {
   rankDailyFacts      KeywordRankDaily[]
   serpSnapshots       SerpSnapshot[]
   serpEvents          SerpSnapshotEvent[]
+  attributionFacts    ActionAttributionFact[]
 
   @@unique([websiteId, normalizedKeyword])
   @@index([websiteId, trackingStatus])
@@ -1454,5 +1463,121 @@ model CompetitorDailyFact {
   @@unique([competitorId, date])
   @@index([websiteId, date])
   @@map("competitor_daily_facts")
+}
+
+// ----------------------------------------------------
+// Phase 6.1: Causal Attribution, Synthetic Control & Bayesian Weight Governance
+// ----------------------------------------------------
+
+model ActionAttributionFact {
+  id                    String            @id @default(uuid())
+  websiteId             String
+  actionExecutionId     String            @unique
+  urlIdentityId         String
+  primaryKeywordId      String?
+  seoEventId            String?
+  ruleKey               String
+  cmsProvider           String            // WORDPRESS, SHOPIFY, CUSTOM_API, STATIC_SITE
+  pageArchetype         String            @default("GENERAL")
+  
+  // Temporal Lag Horizons
+  executionDate         DateTime
+  indexingDetectedDate  DateTime?
+  baselineStartDate     DateTime          // T - 30d
+  evaluationStartDate   DateTime          // T + 14d (or post-index detection)
+  evaluationEndDate     DateTime          // T + 45d
+
+  // Treatment Pre/Post Metrics
+  preAvgRank            Float
+  postAvgRank           Float
+  rankDelta             Float             // preAvgRank - postAvgRank (+ = improved rank)
+  preClicks30d          Int               @default(0)
+  postClicks30d         Int               @default(0)
+  clickLiftDelta        Int               @default(0)
+  preImpressions30d     Int               @default(0)
+  postImpressions30d    Int               @default(0)
+  impressionLiftDelta   Int               @default(0)
+  preCtr                Float             @default(0.0)
+  postCtr               Float             @default(0.0)
+  ctrDelta              Float             @default(0.0)
+
+  // Synthetic Control & Causal Estimation
+  syntheticControlDelta Float?            // Mean metric delta of matched control cohort
+  netCausalLift         Float             // DiD isolated gain
+  outcomeCategory       String            // WIN, LOSS, NEUTRAL
+  confidenceScore       Float             @default(0.0)
+
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  website               Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  actionExecution       ActionExecution   @relation(fields: [actionExecutionId], references: [id], onDelete: Cascade)
+  urlIdentity           UrlIdentity       @relation(fields: [urlIdentityId], references: [id], onDelete: Cascade)
+  primaryKeyword        KeywordUniverse?  @relation(fields: [primaryKeywordId], references: [id], onDelete: SetNull)
+  seoEvent              SeoEvent?         @relation(fields: [seoEventId], references: [id], onDelete: SetNull)
+  syntheticControls     SyntheticControlMatch[]
+
+  @@index([websiteId, ruleKey])
+  @@index([outcomeCategory])
+  @@index([executionDate])
+  @@index([seoEventId])
+  @@map("action_attribution_facts")
+}
+
+model SyntheticControlMatch {
+  id                    String                 @id @default(uuid())
+  websiteId             String
+  treatmentUrlId        String
+  controlUrlId          String
+  attributionFactId     String?
+  similarityScore       Float
+  matchingFeaturesJson  String                 // Serialized weights and sub-scores
+  baselinePreClicks     Int                    @default(0)
+  baselinePostClicks    Int                    @default(0)
+  baselinePreRank       Float?
+  baselinePostRank      Float?
+  createdAt             DateTime               @default(now())
+
+  website               Website                @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  treatmentUrl          UrlIdentity            @relation("TreatmentUrlRelation", fields: [treatmentUrlId], references: [id], onDelete: Cascade)
+  controlUrl            UrlIdentity            @relation("ControlUrlRelation", fields: [controlUrlId], references: [id], onDelete: Cascade)
+  attributionFact       ActionAttributionFact? @relation(fields: [attributionFactId], references: [id], onDelete: SetNull)
+
+  @@index([treatmentUrlId])
+  @@index([controlUrlId])
+  @@index([attributionFactId])
+  @@map("synthetic_control_matches")
+}
+
+model BayesianRuleWeightState {
+  id                    String            @id @default(uuid())
+  websiteId             String
+  ruleKey               String
+  cmsProvider           String            @default("ALL")
+  pageArchetype         String            @default("ALL")
+  
+  // Beta-Binomial Posterior State
+  alphaPrior            Float             @default(2.0)
+  betaPrior             Float             @default(2.0)
+  observedWins          Int               @default(0)
+  observedLosses        Int               @default(0)
+  observedNeutrals      Int               @default(0)
+  alphaPosterior        Float             @default(2.0)
+  betaPosterior         Float             @default(2.0)
+  
+  // Policy Approval & Clamping State
+  rawCalculatedWeight   Float             @default(1.0)
+  approvedAppliedWeight Float             @default(1.0)
+  isAutoDamped          Boolean           @default(false)
+  approvalStatus        String            @default("AUTO_APPROVED") // AUTO_APPROVED, PENDING_REVIEW, LOCKED
+  lastEvaluatedAt       DateTime          @default(now())
+  lastApprovedAt        DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  website               Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, ruleKey, cmsProvider, pageArchetype])
+  @@index([websiteId, approvedAppliedWeight])
+  @@map("bayesian_rule_weight_states")
 }
 

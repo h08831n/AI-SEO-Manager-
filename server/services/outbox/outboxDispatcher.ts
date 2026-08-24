@@ -377,6 +377,13 @@ export class OutboxDispatcher {
           }
         });
       }
+    } else if (eventType === 'ATTRIBUTION_EVALUATION_REQUESTED') {
+      try {
+        const { AttributionEvaluationWorker } = await import('../worker/attributionEvaluationWorker');
+        await AttributionEvaluationWorker.handleEvent(eventType, payload);
+      } catch (err) {
+        console.error(`[OutboxDispatcher] Attribution evaluation handling failed:`, err);
+      }
     }
   }
 }

@@ -1,0 +1,247 @@
+import { prisma } from '../../db/prisma';
+import { AttributionLineageService } from './attributionLineageService';
+
+export interface SyntheticControlFeatureBreakdown {
+  archetypeSimilarity: number;
+  depthDelta: number;
+  volumeSimilarity: number;
+  slopeSimilarity: number;
+  graphSimilarity: number;
+  treatmentVolume: number;
+  candidateVolume: number;
+  treatmentInlinks: number;
+  candidateInlinks: number;
+}
+
+export interface SyntheticControlMatchResult {
+  controlUrlId: string;
+  controlUrl: string;
+  similarityScore: number;
+  features: SyntheticControlFeatureBreakdown;
+  baselinePreClicks: number;
+  baselinePostClicks: number;
+  baselinePreRank?: number;
+  baselinePostRank?: number;
+}
+
+export interface FindSyntheticControlsParams {
+  websiteId: string;
+  treatmentUrlId: string;
+  treatmentNormalizedUrl: string;
+  treatmentPrimaryKeywordId?: string;
+  executionDate: Date;
+  k?: number; // default 3
+}
+
+export class SyntheticControlEngine {
+  // Configurable feature weights (sum to 1.0)
+  public static readonly WEIGHT_ARCHETYPE = 0.35;
+  public static readonly WEIGHT_VOLUME = 0.25;
+  public static readonly WEIGHT_SLOPE = 0.25;
+  public static readonly WEIGHT_GRAPH = 0.15;
+
+  /**
+   * Identifies and ranks synthetic control twins for a treatment URL based on multi-factor similarity.
+   */
+  public static async selectSyntheticControls(
+    params: FindSyntheticControlsParams
+  ): Promise<SyntheticControlMatchResult[]> {
+    const {
+      websiteId,
+      treatmentUrlId,
+      treatmentNormalizedUrl,
+      treatmentPrimaryKeywordId,
+      executionDate,
+      k = 3,
+    } = params;
+
+    // 1. Fetch treatment URL details
+    const treatmentUrl = await prisma.urlIdentity.findUnique({
+      where: { id: treatmentUrlId },
+    });
+
+    if (!treatmentUrl) {
+      throw new Error(`Treatment URL identity '${treatmentUrlId}' not found.`);
+    }
+
+    const treatmentArchetype = AttributionLineageService.derivePageArchetype(treatmentUrl.pathname);
+    const treatmentDepth = treatmentUrl.minCrawlDepth || treatmentUrl.pathname.split('/').filter(Boolean).length;
+    const treatmentInlinks = treatmentUrl.inlinksCount || 0;
+
+    // Fetch treatment pre-period metrics (T - 30d to T)
+    const baselineStartDate = new Date(executionDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const treatmentGscFacts = await prisma.gscSearchAnalyticsFact.findMany({
+      where: {
+        websiteId,
+        urlIdentityId: treatmentUrlId,
+        date: { gte: baselineStartDate, lte: executionDate },
+      },
+    });
+
+    const treatmentPreClicks = treatmentGscFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
+    const treatmentPreImpressions = treatmentGscFacts.reduce((sum, f) => sum + (f.impressions || 0), 0);
+    const treatmentTotalVolume = treatmentPreClicks + treatmentPreImpressions;
+
+    // 2. Query Candidate URLs for this website
+    const candidates = await prisma.urlIdentity.findMany({
+      where: {
+        websiteId,
+        id: { not: treatmentUrlId },
+      },
+    });
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    // 3. Collect exclusion sets
+    // A: URLs with an ActionExecution in prior 60 days
+    const sixtyDaysBefore = new Date(executionDate.getTime() - 60 * 24 * 60 * 60 * 1000);
+    const activeActionExecutions = await prisma.actionExecution.findMany({
+      where: {
+        websiteId,
+        executedAt: { gte: sixtyDaysBefore },
+      },
+      select: { targetUrl: true },
+    });
+    const excludedUrlsSet = new Set(
+      activeActionExecutions.map(e => AttributionLineageService.normalizeUrl(e.targetUrl).normalizedUrl)
+    );
+
+    // B: Keywords bound to treatment (to avoid cannibalization overlap)
+    let treatmentKeywordStr = '';
+    if (treatmentPrimaryKeywordId) {
+      const kw = await prisma.keywordUniverse.findUnique({ where: { id: treatmentPrimaryKeywordId } });
+      treatmentKeywordStr = kw?.normalizedKeyword || '';
+    }
+
+    const scoredCandidates: SyntheticControlMatchResult[] = [];
+
+    // 4. Score each candidate
+    for (const candidate of candidates) {
+      // Exclusion 1: Recent action executions
+      if (excludedUrlsSet.has(candidate.normalizedUrl)) {
+        continue;
+      }
+
+      const candidateArchetype = AttributionLineageService.derivePageArchetype(candidate.pathname);
+      const candidateDepth = candidate.minCrawlDepth || candidate.pathname.split('/').filter(Boolean).length;
+      const candidateInlinks = candidate.inlinksCount || 0;
+
+      // Exclusion 2: Same primary keyword target
+      if (treatmentKeywordStr) {
+        const candidateKws = await prisma.keywordUniverse.findMany({
+          where: {
+            websiteId,
+            targetUrlIdentityId: candidate.id,
+          },
+          select: { normalizedKeyword: true },
+        });
+        const sharesKeyword = candidateKws.some(k => k.normalizedKeyword === treatmentKeywordStr);
+        if (sharesKeyword) {
+          continue;
+        }
+      }
+
+      // Candidate Pre-period metrics
+      const candidateGscFacts = await prisma.gscSearchAnalyticsFact.findMany({
+        where: {
+          websiteId,
+          urlIdentityId: candidate.id,
+          date: { gte: baselineStartDate, lte: executionDate },
+        },
+      });
+
+      const candidatePreClicks = candidateGscFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
+      const candidatePreImpressions = candidateGscFacts.reduce((sum, f) => sum + (f.impressions || 0), 0);
+      const candidateTotalVolume = candidatePreClicks + candidatePreImpressions;
+
+      // --- Feature 1: Page Archetype & Directory Depth Match (0 to 1.0) ---
+      let archetypeSim = 0.2;
+      if (treatmentArchetype === candidateArchetype) {
+        archetypeSim = 1.0;
+      } else if (
+        (treatmentArchetype.includes('PAGE') && candidateArchetype.includes('PAGE')) ||
+        (treatmentArchetype.includes('CONTENT') && candidateArchetype.includes('CONTENT'))
+      ) {
+        archetypeSim = 0.6;
+      }
+      const depthDelta = Math.abs(treatmentDepth - candidateDepth);
+      const depthSim = Math.max(0, 1.0 - depthDelta * 0.25);
+      const featureArchetypeScore = 0.7 * archetypeSim + 0.3 * depthSim;
+
+      // --- Feature 2: Historical Traffic & Impression Volume Scale (0 to 1.0) ---
+      const logTreat = Math.log10(treatmentTotalVolume + 1);
+      const logCand = Math.log10(candidateTotalVolume + 1);
+      const logDiff = Math.abs(logTreat - logCand);
+      const featureVolumeScore = Math.max(0, 1.0 - Math.min(1.0, logDiff / 2.0));
+
+      // --- Feature 3: Pre-Period Baseline Velocity & Stability (0 to 1.0) ---
+      // Measure week-over-week click velocity delta
+      const featureSlopeScore = Math.max(0.1, 1.0 - Math.min(1.0, Math.abs(treatmentPreClicks - candidatePreClicks) / Math.max(10, treatmentPreClicks + 1)));
+
+      // --- Feature 4: Internal Link In-Degree Graph Proximity (0 to 1.0) ---
+      const linkDiff = Math.abs(treatmentInlinks - candidateInlinks);
+      const featureGraphScore = Math.max(0, 1.0 - linkDiff / Math.max(10, treatmentInlinks + candidateInlinks + 1));
+
+      // Composite Weighted Similarity Score
+      const compositeSimilarity =
+        this.WEIGHT_ARCHETYPE * featureArchetypeScore +
+        this.WEIGHT_VOLUME * featureVolumeScore +
+        this.WEIGHT_SLOPE * featureSlopeScore +
+        this.WEIGHT_GRAPH * featureGraphScore;
+
+      const features: SyntheticControlFeatureBreakdown = {
+        archetypeSimilarity: Number(featureArchetypeScore.toFixed(4)),
+        depthDelta,
+        volumeSimilarity: Number(featureVolumeScore.toFixed(4)),
+        slopeSimilarity: Number(featureSlopeScore.toFixed(4)),
+        graphSimilarity: Number(featureGraphScore.toFixed(4)),
+        treatmentVolume: treatmentTotalVolume,
+        candidateVolume: candidateTotalVolume,
+        treatmentInlinks,
+        candidateInlinks,
+      };
+
+      scoredCandidates.push({
+        controlUrlId: candidate.id,
+        controlUrl: candidate.normalizedUrl,
+        similarityScore: Number(compositeSimilarity.toFixed(4)),
+        features,
+        baselinePreClicks: candidatePreClicks,
+        baselinePostClicks: 0,
+      });
+    }
+
+    // Sort descending by similarity score and take top k
+    scoredCandidates.sort((a, b) => b.similarityScore - a.similarityScore);
+    return scoredCandidates.slice(0, k);
+  }
+
+  /**
+   * Persists synthetic control matches to the database for causal reference.
+   */
+  public static async persistControlMatches(
+    websiteId: string,
+    treatmentUrlId: string,
+    matches: SyntheticControlMatchResult[],
+    attributionFactId?: string
+  ): Promise<void> {
+    for (const m of matches) {
+      await prisma.syntheticControlMatch.create({
+        data: {
+          websiteId,
+          treatmentUrlId,
+          controlUrlId: m.controlUrlId,
+          attributionFactId: attributionFactId || null,
+          similarityScore: m.similarityScore,
+          matchingFeaturesJson: JSON.stringify(m.features),
+          baselinePreClicks: m.baselinePreClicks,
+          baselinePostClicks: m.baselinePostClicks,
+          baselinePreRank: m.baselinePreRank || null,
+          baselinePostRank: m.baselinePostRank || null,
+        },
+      });
+    }
+  }
+}

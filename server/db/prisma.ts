@@ -24,15 +24,23 @@ function createInMemoryTable(tableName: string) {
       if (typeof val === 'object' && val !== null && !(val instanceof Date) && !Array.isArray(val)) {
         if ('in' in val && Array.isArray((val as any).in)) {
           if (!(val as any).in.includes(item[key])) return false;
-        } else if ('gte' in val || 'lte' in val) {
+        } else if ('gte' in val || 'lte' in val || 'gt' in val || 'lt' in val) {
           const itemVal = item[key] instanceof Date ? item[key].getTime() : item[key];
           if ('gte' in val) {
             const gteVal = val.gte instanceof Date ? val.gte.getTime() : val.gte;
             if (itemVal < gteVal) return false;
           }
+          if ('gt' in val) {
+            const gtVal = val.gt instanceof Date ? val.gt.getTime() : val.gt;
+            if (itemVal <= gtVal) return false;
+          }
           if ('lte' in val) {
             const lteVal = val.lte instanceof Date ? val.lte.getTime() : val.lte;
             if (itemVal > lteVal) return false;
+          }
+          if ('lt' in val) {
+            const ltVal = val.lt instanceof Date ? val.lt.getTime() : val.lt;
+            if (itemVal >= ltVal) return false;
           }
         } else if ('not' in val) {
           if (item[key] === (val as any).not) return false;
@@ -247,6 +255,9 @@ const fallbackClient: any = {
   serpSnapshotEvent: createInMemoryTable('serpSnapshotEvent'),
   competitorDomain: createInMemoryTable('competitorDomain'),
   competitorDailyFact: createInMemoryTable('competitorDailyFact'),
+  actionAttributionFact: createInMemoryTable('actionAttributionFact'),
+  syntheticControlMatch: createInMemoryTable('syntheticControlMatch'),
+  bayesianRuleWeightState: createInMemoryTable('bayesianRuleWeightState'),
 };
 
 const realPrisma = getPrismaClient();

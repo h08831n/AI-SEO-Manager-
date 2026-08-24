@@ -223,6 +223,15 @@ export class ActionOrchestrationService {
           data: { status: ActionStatus.VERIFIED_COMPLETED, completedAt: new Date() },
         });
       }
+
+      if (!rolledBack) {
+        try {
+          const { AttributionLineageService } = await import('../attribution/attributionLineageService');
+          await AttributionLineageService.resolveLineage(actionExecution.id);
+        } catch (lineageErr) {
+          console.warn(`[ActionOrchestrationService] Attribution lineage pre-warm failed:`, lineageErr);
+        }
+      }
     }
 
     return {

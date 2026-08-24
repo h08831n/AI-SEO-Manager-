@@ -18,7 +18,7 @@ export class ActionQueueProducer {
   private static queue: Queue<ActionJobData> | null = null;
 
   static getQueue(): Queue<ActionJobData> | null {
-    if (!process.env.REDIS_URL) {
+    if (!process.env.REDIS_URL || process.env.NODE_ENV === 'test') {
       return null;
     }
     if (!this.queue) {
