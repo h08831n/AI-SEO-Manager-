@@ -1,12 +1,30 @@
 import { prisma } from '../../db/prisma';
-import { AttributionLineageService, AttributionLineageContext } from './attributionLineageService';
-import { SyntheticControlEngine, SyntheticControlMatchResult } from './syntheticControlEngine';
+import { AttributionLineageService } from './attributionLineageService';
+import { SyntheticControlEngine } from './syntheticControlEngine';
 import { OutboxDispatcher } from '../outbox/outboxDispatcher';
+import {
+  ATTRIBUTION_MODEL_VERSION,
+  MIN_ATTRIBUTION_HORIZON_DAYS,
+  ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD,
+  ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD,
+  WIN_CLICK_LIFT_DELTA_THRESHOLD,
+  WIN_RANK_DELTA_THRESHOLD,
+  LOSS_CLICK_LIFT_DELTA_THRESHOLD,
+  LOSS_RANK_DELTA_THRESHOLD,
+  SERP_VOLATILITY_PENALTY_MULTIPLIER,
+  buildAttributionEvaluationKey,
+} from '../../config/attributionConstants';
+
+export interface AttributionEvaluationOptions {
+  evaluationHorizonDays?: number;
+  modelVersion?: string;
+}
 
 export interface AttributionEvaluationResult {
   attributionFactId: string;
   actionExecutionId: string;
-  evaluationKey?: string;
+  evaluationKey: string;
+  modelVersion: string;
   websiteId: string;
   urlIdentityId: string;
   primaryKeywordId?: string;
@@ -32,8 +50,17 @@ export class CausalAttributionEngine {
    */
   public static async evaluateActionExecution(
     actionExecutionId: string,
-    evaluationHorizonDays: number = 30
+    horizonOrOptions: number | AttributionEvaluationOptions = 30
   ): Promise<AttributionEvaluationResult> {
+    const evaluationHorizonDays =
+      typeof horizonOrOptions === 'number'
+        ? horizonOrOptions
+        : horizonOrOptions.evaluationHorizonDays ?? 30;
+    const modelVersion =
+      typeof horizonOrOptions === 'object' && horizonOrOptions.modelVersion
+        ? horizonOrOptions.modelVersion
+        : ATTRIBUTION_MODEL_VERSION;
+
     // 1. Resolve full lineage context
     const lineage = await AttributionLineageService.resolveLineage(actionExecutionId);
     const {
@@ -70,103 +97,96 @@ export class CausalAttributionEngine {
       where: {
         websiteId,
         urlIdentityId,
-        date: { gte: executionDate, lte: evaluationEndDate },
+        date: { gte: evaluationStartDate, lte: evaluationEndDate },
       },
     });
 
-    // Compute Treatment Pre-Period Metrics
-    const preClicks = treatmentPreFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
-    const preImpressions = treatmentPreFacts.reduce((sum, f) => sum + (f.impressions || 0), 0);
-    const preCtr = preImpressions > 0 ? preClicks / preImpressions : 0;
-    const preAvgRank =
-      treatmentPreFacts.length > 0
-        ? treatmentPreFacts.reduce((sum, f) => sum + (f.position || 0), 0) / treatmentPreFacts.length
-        : 25.0; // Baseline fallback
+    const preClicks = treatmentPreFacts.reduce((sum, f) => sum + f.clicks, 0);
+    const postClicks = treatmentPostFacts.reduce((sum, f) => sum + f.clicks, 0);
+    const clickLiftDelta = postClicks - preClicks;
 
-    // Compute Treatment Post-Period Metrics
-    const postClicks = treatmentPostFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
-    const postImpressions = treatmentPostFacts.reduce((sum, f) => sum + (f.impressions || 0), 0);
-    const postCtr = postImpressions > 0 ? postClicks / postImpressions : 0;
-    const postAvgRank =
-      treatmentPostFacts.length > 0
-        ? treatmentPostFacts.reduce((sum, f) => sum + (f.position || 0), 0) / treatmentPostFacts.length
-        : preAvgRank;
+    const preImpressions = treatmentPreFacts.reduce((sum, f) => sum + f.impressions, 0);
+    const postImpressions = treatmentPostFacts.reduce((sum, f) => sum + f.impressions, 0);
+    const impressionLiftDelta = postImpressions - preImpressions;
 
-    // Check if rank tracking daily facts provide tighter primary keyword rankings
-    let primaryKwPreRank: number | null = null;
-    let primaryKwPostRank: number | null = null;
-    if (primaryKeywordId) {
-      const preRankFacts = await prisma.keywordRankDaily.findMany({
+    const preCtr = preImpressions > 0 ? Number((preClicks / preImpressions).toFixed(4)) : 0.0;
+    const postCtr = postImpressions > 0 ? Number((postClicks / postImpressions).toFixed(4)) : 0.0;
+    const ctrDelta = Number((postCtr - preCtr).toFixed(4));
+
+    // Treatment Average Rank calculation (weighted by impressions, or simple mean)
+    const calcWeightedRank = (facts: typeof treatmentPreFacts): number => {
+      const validRankFacts = facts.filter((f) => f.position > 0);
+      if (validRankFacts.length === 0) return 0;
+      const totalImps = validRankFacts.reduce((sum, f) => sum + Math.max(1, f.impressions), 0);
+      const weightedSum = validRankFacts.reduce((sum, f) => sum + f.position * Math.max(1, f.impressions), 0);
+      return totalImps > 0 ? weightedSum / totalImps : 0;
+    };
+
+    let preAvgRank = calcWeightedRank(treatmentPreFacts);
+    let postAvgRank = calcWeightedRank(treatmentPostFacts);
+
+    // If GSC position facts were sparse, check KeywordRankDaily fallback
+    if (preAvgRank === 0 || postAvgRank === 0) {
+      const keywordRanks = await prisma.keywordRankDaily.findMany({
         where: {
           websiteId,
-          keywordId: primaryKeywordId,
-          date: { gte: baselineStartDate, lt: executionDate },
+          ...(primaryKeywordId ? { keywordId: primaryKeywordId } : {}),
+          date: { gte: baselineStartDate, lte: evaluationEndDate },
         },
       });
-      const postRankFacts = await prisma.keywordRankDaily.findMany({
-        where: {
-          websiteId,
-          keywordId: primaryKeywordId,
-          date: { gte: executionDate, lte: evaluationEndDate },
-        },
-      });
-      if (preRankFacts.length > 0) {
-        primaryKwPreRank = preRankFacts.reduce((sum, r) => sum + (r.rank || 0), 0) / preRankFacts.length;
+
+      const preKeywordRanks = keywordRanks.filter((r) => new Date(r.date) < executionDate && r.rank > 0);
+      const postKeywordRanks = keywordRanks.filter((r) => new Date(r.date) >= evaluationStartDate && r.rank > 0);
+
+      if (preAvgRank === 0 && preKeywordRanks.length > 0) {
+        preAvgRank = preKeywordRanks.reduce((s, r) => s + r.rank, 0) / preKeywordRanks.length;
       }
-      if (postRankFacts.length > 0) {
-        primaryKwPostRank = postRankFacts.reduce((sum, r) => sum + (r.rank || 0), 0) / postRankFacts.length;
+      if (postAvgRank === 0 && postKeywordRanks.length > 0) {
+        postAvgRank = postKeywordRanks.reduce((s, r) => s + r.rank, 0) / postKeywordRanks.length;
       }
     }
 
-    const effectivePreRank = primaryKwPreRank ?? preAvgRank;
-    const effectivePostRank = primaryKwPostRank ?? postAvgRank;
-    // Rank delta: positive means rank improved (e.g. went from pos 15 to pos 10 = +5.0 improvement)
+    // Default fallback if no rank observation found
+    const effectivePreRank = preAvgRank > 0 ? preAvgRank : 50.0;
+    const effectivePostRank = postAvgRank > 0 ? postAvgRank : 50.0;
+    // Rank delta: positive means rank improvement (e.g. from position 10 to 5 is +5)
     const rankDelta = Number((effectivePreRank - effectivePostRank).toFixed(2));
-    const clickLiftDelta = postClicks - preClicks;
-    const impressionLiftDelta = postImpressions - preImpressions;
-    const ctrDelta = Number((postCtr - preCtr).toFixed(4));
 
-    // 4. Select & Calculate Synthetic Control Cohort Delta
+    // 4. Synthetic Control Group Construction & Counterfactual Estimation
     const controlMatches = await SyntheticControlEngine.selectSyntheticControls({
       websiteId,
       treatmentUrlId: urlIdentityId,
-      treatmentNormalizedUrl: lineage.normalizedUrl,
-      treatmentPrimaryKeywordId: primaryKeywordId,
+      treatmentNormalizedUrl: lineage.normalizedUrl || lineage.targetUrl,
+      treatmentPrimaryKeywordId: primaryKeywordId || undefined,
       executionDate,
       k: 3,
     });
 
-    let syntheticControlDelta = 0;
-    const evaluatedControls: SyntheticControlMatchResult[] = [];
-
-    if (controlMatches.length > 0) {
-      let totalControlClickDelta = 0;
-      for (const ctrl of controlMatches) {
-        const ctrlPostFacts = await prisma.gscSearchAnalyticsFact.findMany({
-          where: {
-            websiteId,
-            urlIdentityId: ctrl.controlUrlId,
-            date: { gte: executionDate, lte: evaluationEndDate },
-          },
-        });
-        const ctrlPostClicks = ctrlPostFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
-        const ctrlClickDelta = ctrlPostClicks - ctrl.baselinePreClicks;
-        totalControlClickDelta += ctrlClickDelta;
-
-        evaluatedControls.push({
-          ...ctrl,
-          baselinePostClicks: ctrlPostClicks,
-        });
-      }
-      syntheticControlDelta = totalControlClickDelta / controlMatches.length;
+    let controlLiftSum = 0;
+    for (const match of controlMatches) {
+      const controlPostFacts = await prisma.gscSearchAnalyticsFact.findMany({
+        where: {
+          websiteId,
+          urlIdentityId: match.controlUrlId,
+          date: { gte: evaluationStartDate, lte: evaluationEndDate },
+        },
+      });
+      const controlPostClicks = controlPostFacts.reduce((sum, f) => sum + f.clicks, 0);
+      match.baselinePostClicks = controlPostClicks;
+      controlLiftSum += (controlPostClicks - match.baselinePreClicks);
     }
 
-    // 5. Check for SERP Volatility / Major Algorithm Fluctuations during observation window
-    const serpVolatilityEvents = await prisma.serpSnapshotEvent.findMany({
+    const syntheticControlDelta =
+      controlMatches.length > 0
+        ? Number((controlLiftSum / controlMatches.length).toFixed(2))
+        : 0.0;
+
+    // 5. Exogenous Volatility / Algorithm Anomaly Check
+    const serpVolatilityEvents = await prisma.seoEvent.findMany({
       where: {
         websiteId,
-        createdAt: { gte: executionDate, lte: evaluationEndDate },
-        eventType: { in: ['ALGORITHM_UPDATE_DETECTED', 'SERP_VOLATILITY_SURGE'] as any },
+        eventType: { in: ['SERP_ALGORITHM_UPDATE', 'COMPETITOR_SURGE', 'SITEWIDE_CRAWL_ANOMALY'] },
+        detectedAt: { gte: executionDate, lte: evaluationEndDate },
       },
     });
     const isSerpVolatile = serpVolatilityEvents.length > 0;
@@ -194,7 +214,9 @@ export class CausalAttributionEngine {
 
     // Apply volatility penalty to confidence score if SERP had turbulent algorithm updates
     if (isSerpVolatile) {
-      confidenceScore = Number(Math.max(0.1, confidenceScore * 0.5).toFixed(2));
+      confidenceScore = Number(
+        Math.max(0.1, confidenceScore * SERP_VOLATILITY_PENALTY_MULTIPLIER).toFixed(2)
+      );
     }
 
     // 8. Outcome Category Classification with INCONCLUSIVE & Confidence Thresholds
@@ -205,49 +227,65 @@ export class CausalAttributionEngine {
     // 2. Insufficient data points (e.g. 0 pre or post facts, or pre impressions = 0 and post impressions = 0)
     // 3. No viable control twins found (controlMatches.length === 0)
     // 4. Extreme SERP volatility detected during evaluation window
-    // 5. Confidence score falls below the required threshold for deterministic attribution (threshold: 0.45)
-    const isShortWindow = evaluationHorizonDays < 14;
+    // 5. Confidence score falls below the required threshold for deterministic attribution
+    const isShortWindow = evaluationHorizonDays < MIN_ATTRIBUTION_HORIZON_DAYS;
     const isInsufficientData = treatmentPreFacts.length === 0 && treatmentPostFacts.length === 0;
     const isMissingControlGroup = controlMatches.length === 0;
 
-    if (isShortWindow || isInsufficientData || isMissingControlGroup || isSerpVolatile || confidenceScore < 0.45) {
+    if (
+      isShortWindow ||
+      isInsufficientData ||
+      isMissingControlGroup ||
+      isSerpVolatile ||
+      confidenceScore < ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD
+    ) {
       outcomeCategory = 'INCONCLUSIVE';
     } else {
       // Explicit confidence thresholds required for WIN/LOSS assignment (confidence >= 0.50)
-      const isConfident = confidenceScore >= 0.50;
+      const isConfident = confidenceScore >= ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD;
 
-      if (isConfident && (netCausalLift >= 5 || (rankDelta >= 1.5 && clickLiftDelta >= 0))) {
+      if (
+        isConfident &&
+        (netCausalLift >= WIN_CLICK_LIFT_DELTA_THRESHOLD ||
+          (rankDelta >= WIN_RANK_DELTA_THRESHOLD && clickLiftDelta >= 0))
+      ) {
         outcomeCategory = 'WIN';
-      } else if (isConfident && (netCausalLift <= -5 || (rankDelta <= -1.5 && clickLiftDelta < 0))) {
+      } else if (
+        isConfident &&
+        (netCausalLift <= LOSS_CLICK_LIFT_DELTA_THRESHOLD ||
+          (rankDelta <= LOSS_RANK_DELTA_THRESHOLD && clickLiftDelta < 0))
+      ) {
         outcomeCategory = 'LOSS';
       } else {
         outcomeCategory = 'NEUTRAL';
       }
     }
 
-    // 9. Generate Deterministic Evaluation Key for Idempotency
-    const evaluationKey = `eval:${actionExecutionId}:w${evaluationHorizonDays}d:${evaluationStartDate.toISOString().slice(0, 10)}_${evaluationEndDate.toISOString().slice(0, 10)}`;
+    // 9. Generate Deterministic Version-Aware Evaluation Key
+    const evaluationKey = buildAttributionEvaluationKey({
+      websiteId,
+      actionExecutionId,
+      evaluationStartDate,
+      evaluationEndDate,
+      modelVersion,
+    });
 
-    // 10. Persist or Update ActionAttributionFact (Idempotent upsert logic)
-    const existingFact =
-      (await prisma.actionAttributionFact.findUnique({
-        where: { actionExecutionId },
-      })) ||
-      (await prisma.actionAttributionFact.findUnique({
-        where: { evaluationKey } as any,
-      }));
+    // 10. Persist or Update ActionAttributionFact (Idempotent upsert by evaluationKey)
+    const existingFact = await prisma.actionAttributionFact.findUnique({
+      where: { evaluationKey },
+    });
 
     let attributionFact;
     if (existingFact) {
       attributionFact = await prisma.actionAttributionFact.update({
         where: { id: existingFact.id },
         data: {
-          evaluationKey,
           primaryKeywordId: primaryKeywordId || null,
           seoEventId: seoEventId || null,
           ruleKey,
           cmsProvider,
           pageArchetype,
+          modelVersion,
           executionDate,
           baselineStartDate,
           evaluationStartDate,
@@ -276,6 +314,7 @@ export class CausalAttributionEngine {
           websiteId,
           actionExecutionId,
           evaluationKey,
+          modelVersion,
           urlIdentityId,
           primaryKeywordId: primaryKeywordId || null,
           seoEventId: seoEventId || null,
@@ -310,7 +349,7 @@ export class CausalAttributionEngine {
     await SyntheticControlEngine.persistControlMatches(
       websiteId,
       urlIdentityId,
-      evaluatedControls,
+      controlMatches,
       attributionFact.id
     );
 
@@ -326,6 +365,7 @@ export class CausalAttributionEngine {
             attributionFactId: attributionFact.id,
             actionExecutionId,
             evaluationKey,
+            modelVersion,
             outcomeCategory,
             netCausalLift,
             rankDelta,
@@ -347,6 +387,7 @@ export class CausalAttributionEngine {
         attributionFactId: attributionFact.id,
         actionExecutionId,
         evaluationKey,
+        modelVersion,
         websiteId,
         ruleKey,
         cmsProvider,
@@ -363,6 +404,7 @@ export class CausalAttributionEngine {
       attributionFactId: attributionFact.id,
       actionExecutionId,
       evaluationKey,
+      modelVersion,
       websiteId,
       urlIdentityId,
       primaryKeywordId: primaryKeywordId || undefined,
@@ -374,11 +416,11 @@ export class CausalAttributionEngine {
       clickLiftDelta,
       impressionLiftDelta,
       ctrDelta,
-      preAvgRank: effectivePreRank,
-      postAvgRank: effectivePostRank,
+      preAvgRank: Number(effectivePreRank.toFixed(2)),
+      postAvgRank: Number(effectivePostRank.toFixed(2)),
       preClicks,
       postClicks,
-      controlMatchesCount: evaluatedControls.length,
+      controlMatchesCount: controlMatches.length,
     };
   }
 }

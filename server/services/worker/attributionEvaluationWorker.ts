@@ -35,8 +35,9 @@ export class AttributionEvaluationWorker {
     const results: AttributionEvaluationResult[] = [];
 
     for (const exec of executions) {
-      const existingFact = await prisma.actionAttributionFact.findUnique({
+      const existingFact = await prisma.actionAttributionFact.findFirst({
         where: { actionExecutionId: exec.id },
+        orderBy: { evaluationEndDate: 'desc' },
       });
 
       // Evaluate if not yet evaluated, or if mature (45+ days) and previous evaluation was early (< 30d)

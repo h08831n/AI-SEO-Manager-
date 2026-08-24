@@ -7,6 +7,11 @@ import { AttributionEvaluationWorker } from '../server/services/worker/attributi
 import { AttributionQueueProducer } from '../server/queues/attributionQueueProducer';
 import { OutboxDispatcher } from '../server/services/outbox/outboxDispatcher';
 import { BayesianInputBoundary } from '../server/services/bayesian/bayesianInputBoundary';
+import {
+  ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD,
+  ATTRIBUTION_MODEL_VERSION,
+  buildAttributionEvaluationKey,
+} from '../server/config/attributionConstants';
 import { ActionStatus } from '@prisma/client';
 
 describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', () => {
@@ -330,7 +335,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
       expect(result.confidenceScore).toBeGreaterThan(0.5);
 
       // Verify persisted ActionAttributionFact
-      const savedFact = await prisma.actionAttributionFact.findUnique({
+      const savedFact = await prisma.actionAttributionFact.findFirst({
         where: { actionExecutionId: exec.id },
       });
       expect(savedFact).toBeDefined();
@@ -474,7 +479,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
       const shortWindowResult = await CausalAttributionEngine.evaluateActionExecution(exec.id, 7);
       expect(shortWindowResult.outcomeCategory).toBe('INCONCLUSIVE');
 
-      const savedFact = await prisma.actionAttributionFact.findUnique({
+      const savedFact = await prisma.actionAttributionFact.findFirst({
         where: { actionExecutionId: exec.id },
       });
       expect(savedFact?.outcomeCategory).toBe('INCONCLUSIVE');
@@ -679,7 +684,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
       expect(evalResult.confidenceScore).toBeGreaterThanOrEqual(0.50);
 
       // 7. Verify ActionAttributionFact was created and links back to SeoEvent
-      const attributionFact = await prisma.actionAttributionFact.findUnique({
+      const attributionFact = await prisma.actionAttributionFact.findFirst({
         where: { actionExecutionId: actionExec.id },
         include: {
           seoEvent: true,
@@ -983,6 +988,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
         data: {
           websiteId: testSite,
           actionExecutionId: exec1.id,
+          evaluationKey: `boundary-fact-1-${Date.now()}`,
           urlIdentityId: url.id,
           ruleKey: 'RULE_TITLE_TAG',
           cmsProvider: 'CUSTOM',
@@ -1004,6 +1010,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
         data: {
           websiteId: testSite,
           actionExecutionId: exec2.id,
+          evaluationKey: `boundary-fact-2-${Date.now()}`,
           urlIdentityId: url.id,
           ruleKey: 'RULE_TITLE_TAG',
           cmsProvider: 'CUSTOM',
@@ -1025,6 +1032,156 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
       expect(eligibleDbFacts[0].actionExecutionId).toBe(exec1.id);
       expect(eligibleDbFacts[0].outcomeCategory).toBe('WIN');
       expect(eligibleDbFacts[0].confidenceScore).toBe(0.82);
+    });
+
+    it('enforces centralized ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD on boundary edge cases', () => {
+      const pastDate = new Date('2026-05-01T00:00:00Z');
+      const now = new Date('2026-05-20T00:00:00Z');
+
+      // 0.49 -> Below centralized threshold (0.50) -> Rejected
+      const subThresholdFact = {
+        outcomeCategory: 'WIN',
+        confidenceScore: ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD - 0.01,
+        evaluationEndDate: pastDate,
+      };
+      expect(BayesianInputBoundary.isEligibleForBayesianLearning(subThresholdFact, { now })).toBe(false);
+
+      // 0.50 -> Exactly at centralized threshold -> Accepted
+      const exactThresholdFact = {
+        outcomeCategory: 'WIN',
+        confidenceScore: ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD,
+        evaluationEndDate: pastDate,
+      };
+      expect(BayesianInputBoundary.isEligibleForBayesianLearning(exactThresholdFact, { now })).toBe(true);
+    });
+  });
+
+  describe('7. Version-Aware Evaluation Keys & Multi-Horizon Non-Conflict', () => {
+    it('supports multiple evaluations with different horizons for the same action without conflict', async () => {
+      const siteId = 'site-version-aware-01';
+      await prisma.website.upsert({
+        where: { id: siteId },
+        update: {},
+        create: {
+          id: siteId,
+          workspaceId: 'ws-version-aware',
+          productionUrl: 'https://multi-horizon.io',
+          domain: 'multi-horizon.io',
+          name: 'Multi Horizon Corp',
+        },
+      });
+
+      const execDate = new Date('2026-05-01T00:00:00Z');
+      const pageUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: siteId,
+          normalizedUrl: 'https://multi-horizon.io/blog/scaling',
+          pathname: '/blog/scaling',
+        },
+      });
+
+      const actionExec = await prisma.actionExecution.create({
+        data: {
+          websiteId: siteId,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: pageUrl.normalizedUrl,
+          idempotencyKey: `multi-horizon-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: execDate,
+          verifiedAt: execDate,
+        },
+      });
+
+      // Horizon 1: 20 days
+      const result20d = await CausalAttributionEngine.evaluateActionExecution(actionExec.id, {
+        evaluationHorizonDays: 20,
+      });
+
+      // Horizon 2: 45 days
+      const result45d = await CausalAttributionEngine.evaluateActionExecution(actionExec.id, {
+        evaluationHorizonDays: 45,
+      });
+
+      expect(result20d.evaluationKey).not.toBe(result45d.evaluationKey);
+      expect(result20d.attributionFactId).not.toBe(result45d.attributionFactId);
+
+      // Verify both exist independently in the database
+      const allFacts = await prisma.actionAttributionFact.findMany({
+        where: { actionExecutionId: actionExec.id },
+      });
+
+      expect(allFacts.length).toBe(2);
+      const keys = allFacts.map((f) => f.evaluationKey);
+      expect(keys).toContain(result20d.evaluationKey);
+      expect(keys).toContain(result45d.evaluationKey);
+    });
+
+    it('generates distinct evaluationKey when modelVersion changes', async () => {
+      const siteId = 'site-model-version-01';
+      await prisma.website.upsert({
+        where: { id: siteId },
+        update: {},
+        create: {
+          id: siteId,
+          workspaceId: 'ws-model-version',
+          productionUrl: 'https://model-version.io',
+          domain: 'model-version.io',
+          name: 'Model Version Corp',
+        },
+      });
+
+      const execDate = new Date('2026-05-01T00:00:00Z');
+      const pageUrl = await prisma.urlIdentity.create({
+        data: {
+          websiteId: siteId,
+          normalizedUrl: 'https://model-version.io/pricing',
+          pathname: '/pricing',
+        },
+      });
+
+      const actionExec = await prisma.actionExecution.create({
+        data: {
+          websiteId: siteId,
+          actionType: 'TITLE_TAG_OPTIMIZATION',
+          targetUrl: pageUrl.normalizedUrl,
+          idempotencyKey: `model-version-exec-${Date.now()}`,
+          state: ActionStatus.VERIFIED_COMPLETED,
+          executedAt: execDate,
+          verifiedAt: execDate,
+        },
+      });
+
+      // Model Version 1: Default ('causal-did-v1')
+      const resultV1 = await CausalAttributionEngine.evaluateActionExecution(actionExec.id, {
+        evaluationHorizonDays: 30,
+        modelVersion: ATTRIBUTION_MODEL_VERSION,
+      });
+
+      // Model Version 2: Experimental ('causal-did-v2')
+      const resultV2 = await CausalAttributionEngine.evaluateActionExecution(actionExec.id, {
+        evaluationHorizonDays: 30,
+        modelVersion: 'causal-did-v2',
+      });
+
+      expect(resultV1.evaluationKey).toContain(ATTRIBUTION_MODEL_VERSION);
+      expect(resultV2.evaluationKey).toContain('causal-did-v2');
+      expect(resultV1.evaluationKey).not.toBe(resultV2.evaluationKey);
+
+      // Verify format matches buildAttributionEvaluationKey
+      const expectedKeyV2 = buildAttributionEvaluationKey({
+        websiteId: siteId,
+        actionExecutionId: actionExec.id,
+        evaluationStartDate: new Date(execDate.getTime() + 14 * 24 * 60 * 60 * 1000),
+        evaluationEndDate: new Date(execDate.getTime() + 30 * 24 * 60 * 60 * 1000),
+        modelVersion: 'causal-did-v2',
+      });
+      expect(resultV2.evaluationKey).toBe(expectedKeyV2);
+
+      // Both versions preserved
+      const facts = await prisma.actionAttributionFact.findMany({
+        where: { actionExecutionId: actionExec.id },
+      });
+      expect(facts.length).toBe(2);
     });
   });
 });

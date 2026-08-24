@@ -6,14 +6,15 @@
  *
  * Strict Production Safeguards:
  * 1. Only consumes AttributionFact records where outcomeCategory is strictly 'WIN' or 'LOSS'.
- * 2. Enforces minimum confidence threshold (default >= 0.50).
+ * 2. Enforces centralized minimum confidence threshold (ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD = 0.50).
  * 3. Enforces that the evaluation window is completed (evaluationEndDate <= now).
  * 4. Explicitly ignores/discards 'INCONCLUSIVE' and 'NEUTRAL' outcomes to prevent noisy or null posterior skew.
  */
 
 import { prisma } from '../../db/prisma';
+import { ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD } from '../../config/attributionConstants';
 
-export const MIN_BAYESIAN_CONFIDENCE_THRESHOLD = 0.50;
+export const MIN_BAYESIAN_CONFIDENCE_THRESHOLD = ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD;
 
 export interface EligibleBayesianFact {
   attributionFactId: string;
@@ -29,6 +30,7 @@ export interface EligibleBayesianFact {
   clickLiftDelta: number;
   evaluationEndDate: Date;
   evaluationKey?: string | null;
+  modelVersion?: string | null;
 }
 
 export interface BayesianInputFilterOptions {
@@ -54,7 +56,7 @@ export class BayesianInputBoundary {
   ): boolean {
     if (!fact) return false;
 
-    const minConfidence = options?.minConfidenceThreshold ?? MIN_BAYESIAN_CONFIDENCE_THRESHOLD;
+    const minConfidence = options?.minConfidenceThreshold ?? ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD;
     const now = options?.now ?? new Date();
 
     // Invariant 1: Strictly WIN or LOSS
@@ -105,6 +107,7 @@ export class BayesianInputBoundary {
         clickLiftDelta: Number(fact.clickLiftDelta ?? 0),
         evaluationEndDate: new Date(fact.evaluationEndDate),
         evaluationKey: fact.evaluationKey || null,
+        modelVersion: fact.modelVersion || null,
       }));
   }
 
@@ -115,7 +118,7 @@ export class BayesianInputBoundary {
     websiteId?: string,
     options?: BayesianInputFilterOptions
   ): Promise<EligibleBayesianFact[]> {
-    const minConfidence = options?.minConfidenceThreshold ?? MIN_BAYESIAN_CONFIDENCE_THRESHOLD;
+    const minConfidence = options?.minConfidenceThreshold ?? ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD;
     const now = options?.now ?? new Date();
 
     const whereClause: any = {

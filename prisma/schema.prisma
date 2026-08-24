@@ -895,7 +895,7 @@ model ActionExecution {
   verifications       ActionVerification[]
   preStateSnapshots   ActionPreStateSnapshot[]
   rollbackHistories   RollbackExecutionHistory[]
-  attributionFact     ActionAttributionFact?
+  attributionFacts    ActionAttributionFact[]
 
   @@index([websiteId, state])
   @@index([idempotencyKey])
@@ -1472,14 +1472,15 @@ model CompetitorDailyFact {
 model ActionAttributionFact {
   id                    String            @id @default(uuid())
   websiteId             String
-  actionExecutionId     String            @unique
-  evaluationKey         String?           @unique
+  actionExecutionId     String
+  evaluationKey         String            @unique
   urlIdentityId         String
   primaryKeywordId      String?
   seoEventId            String?
   ruleKey               String
   cmsProvider           String            // WORDPRESS, SHOPIFY, CUSTOM_API, STATIC_SITE
   pageArchetype         String            @default("GENERAL")
+  modelVersion          String            @default("causal-did-v1")
   
   // Temporal Lag Horizons
   executionDate         DateTime
@@ -1518,6 +1519,7 @@ model ActionAttributionFact {
   seoEvent              SeoEvent?         @relation(fields: [seoEventId], references: [id], onDelete: SetNull)
   syntheticControls     SyntheticControlMatch[]
 
+  @@index([actionExecutionId])
   @@index([websiteId, ruleKey])
   @@index([outcomeCategory])
   @@index([executionDate])
