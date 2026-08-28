@@ -1,5 +1,7 @@
 import * as cheerio from 'cheerio';
 import { CmsProviderRegistry } from './cms/cmsProviderRegistry';
+import { ProductionHttpVerifier } from './productionHttpVerifier';
+import { isProductionMode } from '../../config/runtimeMode';
 
 export interface ParsedDomResult {
   httpStatus: number;
@@ -19,6 +21,33 @@ export class SyntheticHttpFetcher {
    * Performs a synthetic or live HTTP fetch and parses the returned HTML document DOM using Cheerio.
    */
   public static async fetchAndParse(targetUrl: string, platform?: string): Promise<ParsedDomResult> {
+    // 1. If in production or targeting real HTTP(S) URLs, attempt live SSRF-safe probe
+    if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+      try {
+        const liveObs = await ProductionHttpVerifier.verifyLiveUrl(targetUrl);
+        return {
+          httpStatus: liveObs.httpStatus,
+          headers: liveObs.headers,
+          canonicalUrl: liveObs.canonicalUrl,
+          title: liveObs.title,
+          description: liveObs.description,
+          robotsMeta: liveObs.robotsMeta,
+          schemas: liveObs.schemas,
+          links: liveObs.links,
+          locationHeader: liveObs.locationHeader,
+        };
+      } catch (err: any) {
+        if (isProductionMode()) {
+          // In production, live verification failure should fail closed
+          throw new Error(`LIVE_VERIFICATION_PROBE_FAILED: Unable to fetch live target ${targetUrl}: ${err.message}`);
+        }
+      }
+    }
+
+    // 2. In local test/simulation mode with mock URLs, synthesize the wire response from CMS provider state
+    const provider = CmsProviderRegistry.getProvider(platform);
+    const redirect = await provider.getRedirectRule(targetUrl);
+
     let rawHtml: string = '';
     let httpStatus = 200;
     const headers: Record<string, string> = {
@@ -27,56 +56,19 @@ export class SyntheticHttpFetcher {
     };
     let locationHeader: string | null = null;
 
-    // 1. Attempt live HTTP request if target URL is a live or localhost endpoint
-    let liveFetched = false;
-    if (targetUrl.startsWith('http://localhost') || targetUrl.startsWith('http://127.0.0.1')) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        const response = await fetch(targetUrl, {
-          signal: controller.signal,
-          redirect: 'manual',
-          headers: {
-            'User-Agent': 'TechScale-Synthetic-Verification-Bot/1.0',
-          },
-        });
-        clearTimeout(timeoutId);
+    if (redirect) {
+      httpStatus = redirect.statusCode || 301;
+      locationHeader = redirect.destinationUrl;
+      headers['location'] = redirect.destinationUrl;
+      rawHtml = `<!DOCTYPE html><html><head><title>301 Moved Permanently</title></head><body>Redirecting to <a href="${redirect.destinationUrl}">${redirect.destinationUrl}</a></body></html>`;
+    } else {
+      const canonical = await provider.getCanonicalUrl(targetUrl);
+      const meta = await provider.getMetaTags(targetUrl);
+      const schemas = await provider.getStructuredData(targetUrl);
+      const links = await provider.getInternalLinks(targetUrl);
 
-        httpStatus = response.status;
-        locationHeader = response.headers.get('location');
-        response.headers.forEach((val, key) => {
-          headers[key.toLowerCase()] = val;
-        });
-
-        if (response.status >= 300 && response.status < 400 && locationHeader) {
-          rawHtml = `<html><head><meta http-equiv="refresh" content="0;url=${locationHeader}"></head><body>Redirecting to ${locationHeader}</body></html>`;
-        } else {
-          rawHtml = await response.text();
-        }
-        liveFetched = true;
-      } catch (err) {
-        liveFetched = false;
-      }
-    }
-
-    // 2. If not live-fetched (e.g. synthetic test URL / mock provider deployment), synthesize the wire response from CMS provider state
-    if (!liveFetched) {
-      const provider = CmsProviderRegistry.getProvider(platform);
-      const redirect = await provider.getRedirectRule(targetUrl);
-
-      if (redirect) {
-        httpStatus = redirect.statusCode || 301;
-        locationHeader = redirect.destinationUrl;
-        headers['location'] = redirect.destinationUrl;
-        rawHtml = `<!DOCTYPE html><html><head><title>301 Moved Permanently</title></head><body>Redirecting to <a href="${redirect.destinationUrl}">${redirect.destinationUrl}</a></body></html>`;
-      } else {
-        const canonical = await provider.getCanonicalUrl(targetUrl);
-        const meta = await provider.getMetaTags(targetUrl);
-        const schemas = await provider.getStructuredData(targetUrl);
-        const links = await provider.getInternalLinks(targetUrl);
-
-        httpStatus = 200;
-        rawHtml = `<!DOCTYPE html>
+      httpStatus = 200;
+      rawHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -93,10 +85,9 @@ export class SyntheticHttpFetcher {
   </main>
 </body>
 </html>`;
-      }
     }
 
-    // 3. Real Cheerio DOM Parsing & Metadata Extraction
+    // Real Cheerio DOM Parsing & Metadata Extraction
     const $ = cheerio.load(rawHtml);
     const canonicalUrl = $('link[rel="canonical"]').attr('href') || null;
     const title = $('title').text().trim() || null;

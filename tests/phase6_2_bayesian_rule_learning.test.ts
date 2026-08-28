@@ -58,19 +58,19 @@ describe('Phase 6.2: Bayesian Rule Learning & Policy Safety Gate', () => {
 
   describe('1. Policy Safety Gate Isolated Invariants', () => {
     it('enforces step-delta clamping on large positive raw weight shifts', () => {
-      // Current = 1.0, Raw = 1.60 -> Delta = +0.60 (exceeds MAX_WEIGHT_DELTA_PER_CYCLE = 0.35)
+      // Current = 1.0, Raw = 1.60 -> Delta = +0.60 (exceeds MAX_POLICY_CHANGE_PER_CYCLE = 0.15)
       const result = PolicySafetyGate.evaluateWeightUpdate({
         currentAppliedWeight: 1.0,
         currentApprovalStatus: 'AUTO_APPROVED',
         rawCalculatedWeight: 1.60,
         posteriorWinRate: 0.80,
-        observedWins: 6,
-        observedLosses: 0,
+        observedWins: 8,
+        observedLosses: 2, // Total evidence 2+2+10 = 14 >= 10
       });
 
       expect(result.rawCalculatedWeight).toBe(1.60);
-      expect(result.approvedAppliedWeight).toBe(1.35); // 1.0 + 0.35
-      expect(result.deltaApplied).toBe(0.35);
+      expect(result.approvedAppliedWeight).toBe(1.15); // 1.0 + 0.15 clamp
+      expect(result.deltaApplied).toBe(0.15);
       expect(result.driftDetected).toBe(true); // |1.60 - 1.0| = 0.60 >= 0.50
       expect(result.approvalStatus).toBe('PENDING_REVIEW');
       expect(result.isAutoDamped).toBe(false);
@@ -224,7 +224,8 @@ describe('Phase 6.2: Bayesian Rule Learning & Policy Safety Gate', () => {
       expect(dbState).toBeDefined();
       expect(dbState?.alphaPosterior).toBe(5.0);
       expect(dbState?.betaPosterior).toBe(3.0);
-      expect(dbState?.approvedAppliedWeight).toBe(1.25);
+      // Evidence 5+3 = 8 < 10 threshold, so applied weight is safely held at baseline 1.0
+      expect(dbState?.approvedAppliedWeight).toBe(1.0);
     });
 
     it('emits outbox event and flags auto-damping for consistently failing rules', async () => {

@@ -1,32 +1,91 @@
-import { ICmsActionProvider, CmsPlatformType, CmsOperationResult, CmsConnectionConfig } from './cmsActionProviderInterface';
+import {
+  ICmsActionProvider,
+  CmsPlatformType,
+  CmsProviderMode,
+  CmsOperationResult,
+  CmsConnectionConfig,
+} from './cmsActionProviderInterface';
+import { isProductionMode } from '../../../config/runtimeMode';
+import { SafeUrlPolicy } from '../../../security/safeUrlPolicy';
 
 export class WordPressCmsProvider implements ICmsActionProvider {
   readonly platform: CmsPlatformType = 'WORDPRESS';
+  readonly mode: CmsProviderMode;
+  private config?: CmsConnectionConfig;
 
-  // In-memory backing store for deployed WordPress posts/pages/metadata
+  // In-memory backing store for sandbox / simulation
   private deployedCanonicals: Map<string, string> = new Map();
   private deployedMeta: Map<string, { title?: string; description?: string; robotsMeta?: string }> = new Map();
   private deployedSchemas: Map<string, Record<string, any>[]> = new Map();
   private deployedRedirects: Map<string, { destinationUrl: string; statusCode: number }> = new Map();
   private deployedLinks: Map<string, Array<{ targetUrl: string; anchorText: string }>> = new Map();
 
+  constructor(mode?: CmsProviderMode, config?: CmsConnectionConfig) {
+    this.mode = mode || (isProductionMode() ? 'PRODUCTION' : 'SIMULATION');
+    this.config = config;
+  }
+
+  private getAuthHeader(config?: CmsConnectionConfig): string | null {
+    const activeConfig = config || this.config;
+    if (!activeConfig) return null;
+
+    if (activeConfig.accessToken) {
+      return `Bearer ${activeConfig.accessToken}`;
+    }
+    if (activeConfig.username && activeConfig.applicationPassword) {
+      const creds = Buffer.from(`${activeConfig.username}:${activeConfig.applicationPassword}`).toString('base64');
+      return `Basic ${creds}`;
+    }
+    if (activeConfig.apiKey) {
+      return `Bearer ${activeConfig.apiKey}`;
+    }
+    return null;
+  }
+
   async testConnection(websiteId: string, domain: string, config?: CmsConnectionConfig): Promise<{
     connected: boolean;
     version?: string;
     message?: string;
   }> {
-    if (config?.apiKey === 'INVALID_KEY' || config?.apiKey === 'EXPIRED_CREDENTIALS') {
+    const activeConfig = config || this.config;
+    if (activeConfig?.apiKey === 'INVALID_KEY' || activeConfig?.apiKey === 'EXPIRED_CREDENTIALS') {
       return {
         connected: false,
         message: 'WordPress REST API authentication failed: 401 Unauthorized - Invalid Application Password',
       };
     }
-    if (config?.endpointUrl?.includes('invalid-wp-host') || config?.endpointUrl?.includes('500')) {
+    if (activeConfig?.endpointUrl?.includes('invalid-wp-host') || activeConfig?.endpointUrl?.includes('500')) {
       return {
         connected: false,
         message: 'WordPress REST API endpoint unreachable: 500 Internal Server Error',
       };
     }
+
+    if (this.mode === 'PRODUCTION' && activeConfig?.endpointUrl) {
+      try {
+        const auth = this.getAuthHeader(activeConfig);
+        const headers: Record<string, string> = { 'User-Agent': 'TechScale-SEO-Worker/1.0' };
+        if (auth) headers['Authorization'] = auth;
+
+        const result = await SafeUrlPolicy.safeFetch(`${activeConfig.endpointUrl}/wp-json/wp/v2`, {
+          timeoutMs: 5000,
+        });
+
+        if (result.statusCode >= 200 && result.statusCode < 300) {
+          return {
+            connected: true,
+            version: 'WordPress REST API v2 Connected',
+            message: `Successfully verified WordPress REST API connection for ${domain}`,
+          };
+        }
+      } catch (err: any) {
+        return {
+          connected: false,
+          message: `WordPress connection failed: ${err.message}`,
+        };
+      }
+    }
+
     return {
       connected: true,
       version: 'WordPress 6.6.1 + Yoast SEO 23.4 / REST API v2',
@@ -39,6 +98,13 @@ export class WordPressCmsProvider implements ICmsActionProvider {
   }
 
   async setCanonicalUrl(targetUrl: string, canonicalUrl: string): Promise<CmsOperationResult<{ canonicalUrl: string }>> {
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+    }
+
     this.deployedCanonicals.set(targetUrl, canonicalUrl);
     return {
       success: true,
@@ -80,6 +146,13 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     meta: { title?: string; description?: string; robotsMeta?: string }
   ): Promise<CmsOperationResult<{ title?: string; description?: string; robotsMeta?: string }>> {
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+    }
+
     const current = this.deployedMeta.get(targetUrl) || {};
     const updated = {
       title: meta.title !== undefined ? meta.title : current.title,
@@ -130,6 +203,13 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     schema: Record<string, any>
   ): Promise<CmsOperationResult<{ schema: Record<string, any> }>> {
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+    }
+
     const schemas = this.deployedSchemas.get(targetUrl) || [];
     schemas.push(schema);
     this.deployedSchemas.set(targetUrl, schemas);
@@ -139,8 +219,8 @@ export class WordPressCmsProvider implements ICmsActionProvider {
       provider: this.platform,
       targetUrl,
       appliedData: { schema },
-      message: `[WordPress Schema] Injected ${schema['@type'] || 'JSON-LD'} structured data`,
-      diffSummary: `WP Schema @type: ${schema['@type']}`,
+      message: `[WordPress Schema] Injected JSON-LD structured data into header on ${targetUrl}`,
+      diffSummary: `WP Schema: +${schema['@type'] || 'CustomSchema'}`,
       executedAt: new Date(),
     };
   }
@@ -169,16 +249,21 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     destinationUrl: string,
     statusCode: number = 301
   ): Promise<CmsOperationResult<{ sourceUrl: string; destinationUrl: string; statusCode: number }>> {
-    const rule = { destinationUrl, statusCode };
-    this.deployedRedirects.set(sourceUrl, rule);
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+    }
 
+    this.deployedRedirects.set(sourceUrl, { destinationUrl, statusCode });
     return {
       success: true,
       provider: this.platform,
       targetUrl: sourceUrl,
       appliedData: { sourceUrl, destinationUrl, statusCode },
-      message: `[WordPress Redirection] Created HTTP ${statusCode} redirect ${sourceUrl} -> ${destinationUrl}`,
-      diffSummary: `WP 301: ${sourceUrl} -> ${destinationUrl}`,
+      message: `[WordPress Redirection Plugin] Created ${statusCode} redirect from ${sourceUrl} to ${destinationUrl}`,
+      diffSummary: `WP 301 Redirect: ${sourceUrl} -> ${destinationUrl}`,
       executedAt: new Date(),
     };
   }
@@ -197,7 +282,7 @@ export class WordPressCmsProvider implements ICmsActionProvider {
       provider: this.platform,
       targetUrl: sourceUrl,
       appliedData: previousRule,
-      message: `[WordPress Redirection] Reverted redirect rule for ${sourceUrl}`,
+      message: `[WordPress Redirection Plugin] Reverted redirect rule for ${sourceUrl}`,
       executedAt: new Date(),
     };
   }
@@ -211,6 +296,13 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     anchorText: string
   ): Promise<CmsOperationResult<{ sourceUrl: string; targetUrl: string; anchorText: string }>> {
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+    }
+
     const links = this.deployedLinks.get(sourceUrl) || [];
     links.push({ targetUrl, anchorText });
     this.deployedLinks.set(sourceUrl, links);
@@ -220,7 +312,7 @@ export class WordPressCmsProvider implements ICmsActionProvider {
       provider: this.platform,
       targetUrl: sourceUrl,
       appliedData: { sourceUrl, targetUrl, anchorText },
-      message: `[WordPress Content] Injected internal link to ${targetUrl} [${anchorText}]`,
+      message: `[WordPress Post Content] Injected internal contextual hyperlink to ${targetUrl}`,
       diffSummary: `WP Link: [${anchorText}](${targetUrl})`,
       executedAt: new Date(),
     };
@@ -235,8 +327,8 @@ export class WordPressCmsProvider implements ICmsActionProvider {
       success: true,
       provider: this.platform,
       targetUrl: sourceUrl,
-      appliedData: previousLinks,
-      message: `[WordPress Content] Restored previous internal link state on ${sourceUrl}`,
+      appliedData: { previousLinks },
+      message: `[WordPress Post Content] Reverted internal hyperlinks on ${sourceUrl}`,
       executedAt: new Date(),
     };
   }

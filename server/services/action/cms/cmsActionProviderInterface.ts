@@ -1,4 +1,5 @@
 export type CmsPlatformType = 'WORDPRESS' | 'SHOPIFY' | 'CUSTOM_API' | 'STATIC_SITE';
+export type CmsProviderMode = 'SIMULATION' | 'SANDBOX' | 'PRODUCTION';
 
 export interface CmsConnectionConfig {
   apiKey?: string;
@@ -6,6 +7,8 @@ export interface CmsConnectionConfig {
   endpointUrl?: string;
   webhookUrl?: string;
   accessToken?: string;
+  username?: string;
+  applicationPassword?: string;
   shopDomain?: string;
   branchName?: string;
   repository?: string;
@@ -24,6 +27,7 @@ export interface CmsOperationResult<T = any> {
 
 export interface ICmsActionProvider {
   readonly platform: CmsPlatformType;
+  readonly mode: CmsProviderMode;
 
   /**
    * Validates credentials and verifies connectivity to the CMS/Platform.

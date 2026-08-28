@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { ApprovalState, ProposedActionItem, StateTransitionLog } from './approvalTypes';
 import { prisma } from '../../../db/prisma';
 
@@ -5,7 +6,7 @@ export class ActionApprovalCenter {
   // Valid State Machine Transitions
   private static ALLOWED_TRANSITIONS: Record<ApprovalState, ApprovalState[]> = {
     PROPOSED: ['APPROVED', 'REJECTED'],
-    APPROVED: ['QUEUED', 'REJECTED'],
+    APPROVED: ['QUEUED', 'EXECUTING', 'REJECTED'],
     REJECTED: ['PROPOSED'], // Can be re-proposed if reworked
     QUEUED: ['EXECUTING', 'REJECTED'],
     EXECUTING: ['VERIFYING', 'ROLLED_BACK'],
@@ -13,6 +14,24 @@ export class ActionApprovalCenter {
     VERIFIED: ['ROLLED_BACK'], // 1-click rollback after verification
     ROLLED_BACK: ['PROPOSED'],
   };
+
+  /**
+   * Deterministic SHA-256 hash of canonicalized JSON payload for approval intent binding.
+   */
+  public static computePayloadHash(payload: Record<string, any>): string {
+    const canonical = (obj: any): any => {
+      if (obj === null || typeof obj !== 'object') return obj;
+      if (Array.isArray(obj)) return obj.map(canonical);
+      return Object.keys(obj)
+        .sort()
+        .reduce((acc: any, key: string) => {
+          acc[key] = canonical(obj[key]);
+          return acc;
+        }, {});
+    };
+    const jsonString = JSON.stringify(canonical(payload || {}));
+    return crypto.createHash('sha256').update(jsonString).digest('hex');
+  }
 
   /**
    * Helper to deserialize Prisma ActionApprovalRequest record to ProposedActionItem.

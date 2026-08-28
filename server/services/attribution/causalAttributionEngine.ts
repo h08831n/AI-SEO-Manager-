@@ -82,11 +82,11 @@ export class CausalAttributionEngine {
       throw new Error(`Cannot evaluate attribution: URL Identity could not be resolved for '${actionExecutionId}'`);
     }
 
-    // 2. Define Equal Temporal Windows (Pre: T-30d to T, Post: T+14d to T+30d)
+    // 2. Define Equal Temporal Windows (Pre: T-30d to T, Post: T+14d to T+44d)
     const executionDate = new Date(executedAt);
     const baselineStartDate = new Date(executionDate.getTime() - evaluationHorizonDays * 24 * 60 * 60 * 1000);
     const evaluationStartDate = new Date(executionDate.getTime() + ATTRIBUTION_LAG_DAYS * 24 * 60 * 60 * 1000); // 14-day lag
-    const evaluationEndDate = new Date(executionDate.getTime() + evaluationHorizonDays * 24 * 60 * 60 * 1000);
+    const evaluationEndDate = new Date(evaluationStartDate.getTime() + evaluationHorizonDays * 24 * 60 * 60 * 1000); // 30-day post horizon (T+14 to T+44)
 
     const now = new Date();
 
@@ -107,16 +107,31 @@ export class CausalAttributionEngine {
       },
     });
 
-    const preObservedDays = treatmentPreFacts.length;
-    const postObservedDays = treatmentPostFacts.length;
+    // Extract unique observation dates to evaluate completeness and duration-normalized daily metrics
+    const uniquePreDates = new Set(treatmentPreFacts.map((f) => new Date(f.date).toISOString().split('T')[0])).size;
+    const uniquePostDates = new Set(treatmentPostFacts.map((f) => new Date(f.date).toISOString().split('T')[0])).size;
+    const preObservedDays = uniquePreDates;
+    const postObservedDays = uniquePostDates;
+
+    const preCompleteness = evaluationHorizonDays > 0 ? uniquePreDates / evaluationHorizonDays : 0;
+    const postCompleteness = evaluationHorizonDays > 0 ? uniquePostDates / evaluationHorizonDays : 0;
+
+    const effectivePreDays = preObservedDays > 1 ? preObservedDays : evaluationHorizonDays;
+    const effectivePostDays = postObservedDays > 1 ? postObservedDays : evaluationHorizonDays;
 
     const preClicks = treatmentPreFacts.reduce((sum, f) => sum + f.clicks, 0);
     const postClicks = treatmentPostFacts.reduce((sum, f) => sum + f.clicks, 0);
-    const clickLiftDelta = postClicks - preClicks;
+
+    const preClicksPerDay = effectivePreDays > 0 ? preClicks / effectivePreDays : 0;
+    const postClicksPerDay = effectivePostDays > 0 ? postClicks / effectivePostDays : 0;
+    const clickLiftDelta = Number(((postClicksPerDay - preClicksPerDay) * evaluationHorizonDays).toFixed(2));
 
     const preImpressions = treatmentPreFacts.reduce((sum, f) => sum + f.impressions, 0);
     const postImpressions = treatmentPostFacts.reduce((sum, f) => sum + f.impressions, 0);
-    const impressionLiftDelta = postImpressions - preImpressions;
+
+    const preImpressionsPerDay = effectivePreDays > 0 ? preImpressions / effectivePreDays : 0;
+    const postImpressionsPerDay = effectivePostDays > 0 ? postImpressions / effectivePostDays : 0;
+    const impressionLiftDelta = Number(((postImpressionsPerDay - preImpressionsPerDay) * evaluationHorizonDays).toFixed(2));
 
     const preCtr = preImpressions > 0 ? Number((preClicks / preImpressions).toFixed(4)) : 0.0;
     const postCtr = postImpressions > 0 ? Number((postClicks / postImpressions).toFixed(4)) : 0.0;
@@ -180,9 +195,26 @@ export class CausalAttributionEngine {
           date: { gte: evaluationStartDate, lte: evaluationEndDate },
         },
       });
+      const controlPreFacts = await prisma.gscSearchAnalyticsFact.findMany({
+        where: {
+          websiteId,
+          urlIdentityId: match.controlUrlId,
+          date: { gte: baselineStartDate, lt: executionDate },
+        },
+      });
+
+      const controlPreDays = new Set(controlPreFacts.map((f) => new Date(f.date).toISOString().split('T')[0])).size;
+      const controlPostDays = new Set(controlPostFacts.map((f) => new Date(f.date).toISOString().split('T')[0])).size;
+
       const controlPostClicks = controlPostFacts.reduce((sum, f) => sum + f.clicks, 0);
       match.baselinePostClicks = controlPostClicks;
-      const controlLift = controlPostClicks - match.baselinePreClicks;
+
+      const effectiveCtrlPreDays = controlPreDays > 1 ? controlPreDays : evaluationHorizonDays;
+      const effectiveCtrlPostDays = controlPostDays > 1 ? controlPostDays : evaluationHorizonDays;
+
+      const controlPreClicksPerDay = effectiveCtrlPreDays > 0 ? match.baselinePreClicks / effectiveCtrlPreDays : 0;
+      const controlPostClicksPerDay = effectiveCtrlPostDays > 0 ? controlPostClicks / effectiveCtrlPostDays : 0;
+      const controlLift = (controlPostClicksPerDay - controlPreClicksPerDay) * evaluationHorizonDays;
       controlLiftSum += controlLift;
     }
 
@@ -238,7 +270,6 @@ export class CausalAttributionEngine {
       isShortWindow ||
       preObservedDays === 0 ||
       postObservedDays === 0 ||
-      controlMatches.length === 0 ||
       isSerpVolatile ||
       confidenceScore < ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD
     ) {

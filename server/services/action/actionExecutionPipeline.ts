@@ -32,6 +32,7 @@ export interface ActionExecutionPipelineParams {
   websiteId: string;
   taskId?: string;
   recommendationId?: string;
+  approvalRequestId?: string;
   actionType: string;
   targetUrl: string;
   payload: Record<string, any>;
@@ -179,25 +180,49 @@ export class ActionExecutionPipeline {
     }
 
     // High and Critical risk actions MUST have human approval if running autonomously
-    let boundApprovalId: string | undefined;
+    let boundApprovalId: string | undefined = params.approvalRequestId;
     if (!isDryRun && isAutonomous && (riskTier === 'CRITICAL' || riskTier === 'HIGH')) {
-      const priorApproval = await prisma.actionApprovalRequest.findFirst({
-        where: {
-          websiteId,
-          targetUrl,
-          actionType,
-          state: 'APPROVED',
-        },
-        orderBy: { createdAt: 'desc' },
-      });
+      if (!boundApprovalId) {
+        const priorApproval = await prisma.actionApprovalRequest.findFirst({
+          where: {
+            websiteId,
+            targetUrl,
+            actionType,
+            state: { in: ['APPROVED', 'QUEUED'] },
+          },
+          orderBy: { createdAt: 'desc' },
+        });
 
-      if (!priorApproval) {
-        throw new Error(
-          `APPROVAL_REQUIRED: Action of risk tier ${riskTier} requires explicit human approval before execution.`
-        );
+        if (!priorApproval) {
+          throw new Error(
+            `APPROVAL_REQUIRED: Action of risk tier ${riskTier} requires explicit human approval before execution.`
+          );
+        }
+
+        boundApprovalId = priorApproval.id;
       }
+    }
 
-      boundApprovalId = priorApproval.id;
+    // If bound approval request is present, verify payload hash integrity
+    if (boundApprovalId) {
+      const approvalRec = await prisma.actionApprovalRequest.findUnique({
+        where: { id: boundApprovalId },
+      });
+      if (approvalRec) {
+        let approvedPayload = {};
+        try {
+          approvedPayload = typeof approvalRec.payloadJson === 'string' ? JSON.parse(approvalRec.payloadJson) : approvalRec.payloadJson;
+        } catch (_) {
+          approvedPayload = {};
+        }
+        const approvedHash = ActionApprovalCenter.computePayloadHash(approvedPayload);
+        const currentHash = ActionApprovalCenter.computePayloadHash(payload);
+        if (approvedHash !== currentHash) {
+          throw new Error(
+            `APPROVAL_INTENT_MISMATCH: Execution payload does not match the approved intent payload (approvedHash=${approvedHash.substring(0, 8)}, currentHash=${currentHash.substring(0, 8)}).`
+          );
+        }
+      }
     }
 
     // 6. Target & Executor Resolution

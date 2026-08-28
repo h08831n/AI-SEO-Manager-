@@ -1,7 +1,19 @@
-import { ICmsActionProvider, CmsPlatformType, CmsOperationResult, CmsConnectionConfig } from './cmsActionProviderInterface';
+import {
+  ICmsActionProvider,
+  CmsPlatformType,
+  CmsProviderMode,
+  CmsOperationResult,
+  CmsConnectionConfig,
+} from './cmsActionProviderInterface';
+import { isProductionMode } from '../../../config/runtimeMode';
 
 export class StaticSiteCmsProvider implements ICmsActionProvider {
   readonly platform: CmsPlatformType = 'STATIC_SITE';
+  readonly mode: CmsProviderMode;
+
+  constructor(mode?: CmsProviderMode) {
+    this.mode = mode || (isProductionMode() ? 'PRODUCTION' : 'SIMULATION');
+  }
 
   private deployedCanonicals: Map<string, string> = new Map();
   private deployedMeta: Map<string, { title?: string; description?: string; robotsMeta?: string }> = new Map();

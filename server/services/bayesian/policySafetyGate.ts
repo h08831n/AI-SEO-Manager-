@@ -122,7 +122,8 @@ export class PolicySafetyGate {
       ? (alphaPosterior + betaPosterior)
       : (DEFAULT_ALPHA_PRIOR + DEFAULT_BETA_PRIOR + totalObs);
 
-    const effectiveMaxDelta = maxStepDelta !== undefined ? maxStepDelta : MAX_WEIGHT_DELTA_PER_CYCLE;
+    const effectiveMinEvidence = minEvidenceThreshold !== undefined ? minEvidenceThreshold : MINIMUM_EVIDENCE_THRESHOLD;
+    const effectiveMaxDelta = maxStepDelta !== undefined ? maxStepDelta : MAX_POLICY_CHANGE_PER_CYCLE;
 
     // 1. Invariant 1: Locked State Protection
     if (currentApprovalStatus === 'LOCKED') {
@@ -139,22 +140,7 @@ export class PolicySafetyGate {
       };
     }
 
-    // 2. Invariant 2: Minimum Evidence Check when explicitly enforced
-    if (minEvidenceThreshold !== undefined && totalEvidence < minEvidenceThreshold) {
-      return {
-        rawCalculatedWeight: Number(rawCalculatedWeight.toFixed(3)),
-        approvedAppliedWeight: Number(currentAppliedWeight.toFixed(3)),
-        approvalStatus: currentApprovalStatus === 'PENDING_REVIEW' ? 'PENDING_REVIEW' : 'ACTIVE',
-        isAutoDamped: false,
-        dampedReason: null,
-        driftDetected: false,
-        deltaApplied: 0,
-        insufficientEvidence: true,
-        auditExplanation: `Evidence (total α+β = ${totalEvidence.toFixed(1)}) is below minimum required threshold (${minEvidenceThreshold}). Weight held constant at ${currentAppliedWeight}.`,
-      };
-    }
-
-    // 3. Invariant 3: Auto-Damping Assessment
+    // 2. Invariant 2: Auto-Damping Assessment (Safety Protection against failing rules)
     const meetsLossDamp = observedLosses >= AUTO_DAMP_LOSS_THRESHOLD && posteriorWinRate < 0.40;
     const meetsWinRateDamp = totalObs >= MIN_OBSERVATIONS_FOR_AUTO_DAMP && posteriorWinRate < AUTO_DAMP_WIN_RATE_THRESHOLD;
     const shouldDamp = meetsLossDamp || meetsWinRateDamp;
@@ -176,6 +162,21 @@ export class PolicySafetyGate {
         deltaApplied: Number((boundedDampedWeight - currentAppliedWeight).toFixed(3)),
         insufficientEvidence: false,
         auditExplanation: `Auto-damped due to poor attribution outcomes: ${dampReason}. Clamped to ${boundedDampedWeight}.`,
+      };
+    }
+
+    // 3. Invariant 3: Minimum Evidence Check (Gating positive weight adjustments)
+    if (totalEvidence < effectiveMinEvidence) {
+      return {
+        rawCalculatedWeight: Number(rawCalculatedWeight.toFixed(3)),
+        approvedAppliedWeight: Number(currentAppliedWeight.toFixed(3)),
+        approvalStatus: currentApprovalStatus === 'PENDING_REVIEW' ? 'PENDING_REVIEW' : 'ACTIVE',
+        isAutoDamped: false,
+        dampedReason: null,
+        driftDetected: false,
+        deltaApplied: 0,
+        insufficientEvidence: true,
+        auditExplanation: `Evidence (total α+β = ${totalEvidence.toFixed(1)}) is below minimum required threshold (${effectiveMinEvidence}). Weight held constant at ${currentAppliedWeight}.`,
       };
     }
 

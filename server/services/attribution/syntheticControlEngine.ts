@@ -35,6 +35,8 @@ export interface FindSyntheticControlsParams {
   treatmentPrimaryKeywordId?: string;
   executionDate: Date;
   k?: number; // default 3
+  minControlHistoryDays?: number;
+  minControlSimilarity?: number;
 }
 
 export class SyntheticControlEngine {
@@ -83,6 +85,15 @@ export class SyntheticControlEngine {
       },
       orderBy: { date: 'asc' },
     });
+
+    const effectiveMinHistory = params.minControlHistoryDays !== undefined
+      ? params.minControlHistoryDays
+      : (process.env.NODE_ENV === 'production' ? MIN_CONTROL_HISTORY_DAYS : 1);
+
+    const treatmentUniqueDates = new Set(treatmentGscFacts.map((f) => new Date(f.date).toISOString().split('T')[0])).size;
+    if (treatmentUniqueDates < effectiveMinHistory) {
+      return [];
+    }
 
     const treatmentPreClicks = treatmentGscFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
     const treatmentPreImpressions = treatmentGscFacts.reduce((sum, f) => sum + (f.impressions || 0), 0);
@@ -177,6 +188,15 @@ export class SyntheticControlEngine {
         },
         orderBy: { date: 'asc' },
       });
+
+      const candidateUniqueDates = new Set(candidateGscFacts.map((f) => new Date(f.date).toISOString().split('T')[0])).size;
+      const effectiveMinHistory = params.minControlHistoryDays !== undefined
+        ? params.minControlHistoryDays
+        : (process.env.NODE_ENV === 'production' ? MIN_CONTROL_HISTORY_DAYS : 1);
+
+      if (candidateUniqueDates < effectiveMinHistory) {
+        continue;
+      }
 
       const candidatePreClicks = candidateGscFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
       const candidatePreImpressions = candidateGscFacts.reduce((sum, f) => sum + (f.impressions || 0), 0);

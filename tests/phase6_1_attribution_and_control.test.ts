@@ -1182,7 +1182,7 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
         websiteId: siteId,
         actionExecutionId: actionExec.id,
         evaluationStartDate: new Date(execDate.getTime() + 14 * 24 * 60 * 60 * 1000),
-        evaluationEndDate: new Date(execDate.getTime() + 30 * 24 * 60 * 60 * 1000),
+        evaluationEndDate: new Date(execDate.getTime() + (14 + 30) * 24 * 60 * 60 * 1000),
         modelVersion: 'causal-did-v2',
       });
       expect(resultV2.evaluationKey).toBe(expectedKeyV2);

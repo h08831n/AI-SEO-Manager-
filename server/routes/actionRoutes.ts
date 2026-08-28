@@ -5,18 +5,21 @@ import { ActionApprovalCenter } from '../services/action/approval/actionApproval
 import { ActionSnapshotService } from '../services/action/snapshots/actionSnapshotService';
 import { StuckExecutionWatchdog } from '../services/action/approval/stuckExecutionWatchdog';
 import { ApprovalState } from '../services/action/approval/approvalTypes';
+import { requireWebsiteAccess, requireWorkspaceAuth } from '../security/authMiddleware';
 import { prisma } from '../db/prisma';
 import { z } from 'zod';
 
 const router = Router();
 
 const ExecuteActionSchema = z.object({
+  websiteId: z.string().optional(),
   actionType: z.string(),
   targetUrl: z.string().url(),
   payload: z.record(z.string(), z.any()),
   idempotencyKey: z.string().min(8),
   taskId: z.string().optional(),
   recommendationId: z.string().optional(),
+  approvalRequestId: z.string().optional(),
   isDryRun: z.boolean().optional(),
   autoVerify: z.boolean().optional(),
   platform: z.string().optional(),
@@ -24,11 +27,15 @@ const ExecuteActionSchema = z.object({
 });
 
 // POST /api/actions/execute
-router.post('/execute', async (req: Request, res: Response) => {
+router.post('/execute', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = (req.headers['x-website-id'] as string) || (req.body.websiteId as string) || 'site-techscale-prod';
-    const userId = (req.headers['x-user-id'] as string) || 'usr-admin-01';
-    const userRole = (req.headers['x-user-role'] as string) || 'ADMIN';
+    const websiteId = req.website?.id || req.body.websiteId;
+    if (!websiteId) {
+      return res.status(400).json({ error: 'TARGET_WEBSITE_REQUIRED', message: 'websiteId is required.' });
+    }
+
+    const userId = req.principal?.userId || 'SYSTEM';
+    const userRole = req.principal?.workspaceMemberships[0]?.role || 'ADMIN';
 
     const parseResult = ExecuteActionSchema.safeParse(req.body);
     if (!parseResult.success) {
@@ -42,6 +49,7 @@ router.post('/execute', async (req: Request, res: Response) => {
       idempotencyKey,
       taskId,
       recommendationId,
+      approvalRequestId,
       isDryRun,
       autoVerify,
       platform,
@@ -52,6 +60,7 @@ router.post('/execute', async (req: Request, res: Response) => {
       websiteId,
       taskId,
       recommendationId,
+      approvalRequestId,
       actionType,
       targetUrl,
       payload,
@@ -71,10 +80,14 @@ router.post('/execute', async (req: Request, res: Response) => {
 });
 
 // POST /api/actions/:id/rollback
-router.post('/:id/rollback', async (req: Request, res: Response) => {
+router.post('/:id/rollback', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = (req.headers['x-website-id'] as string) || (req.body.websiteId as string) || 'site-techscale-prod';
-    const userId = (req.headers['x-user-id'] as string) || 'usr-admin-01';
+    const websiteId = req.website?.id || req.body.websiteId;
+    if (!websiteId) {
+      return res.status(400).json({ error: 'TARGET_WEBSITE_REQUIRED' });
+    }
+
+    const userId = req.principal?.userId || 'SYSTEM';
     const reason = req.body.reason || 'Manual 1-click rollback requested';
     const platform = req.body.platform;
 
@@ -93,9 +106,9 @@ router.post('/:id/rollback', async (req: Request, res: Response) => {
 });
 
 // POST /api/actions/:id/verify
-router.post('/:id/verify', async (req: Request, res: Response) => {
+router.post('/:id/verify', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+    const websiteId = req.website?.id || req.body.websiteId;
     const stage = (req.query.stage as string) || 'STAGE_1_SYNTHETIC_DOM';
     const execution = await prisma.actionExecution.findFirst({
       where: { id: req.params.id, websiteId },
@@ -114,8 +127,8 @@ router.post('/:id/verify', async (req: Request, res: Response) => {
         websiteId,
         targetUrl: execution.targetUrl,
         ruleKey: execution.recommendation?.ruleKey || undefined,
-        gscIndexed: req.body.gscIndexed ?? true,
-        serpFeaturePresent: req.body.serpFeaturePresent ?? true,
+        gscIndexed: req.body.gscIndexed,
+        serpFeaturePresent: req.body.serpFeaturePresent,
       });
       return res.json({ verification });
     }
@@ -125,10 +138,10 @@ router.post('/:id/verify', async (req: Request, res: Response) => {
         actionExecutionId: execution.id,
         websiteId,
         ruleKey: execution.recommendation?.ruleKey || 'GENERAL_ACTION_RULE',
-        preClicks: req.body.preClicks || 100,
-        postClicks: req.body.postClicks || 125,
-        preRank: req.body.preRank || 10,
-        postRank: req.body.postRank || 7,
+        preClicks: req.body.preClicks,
+        postClicks: req.body.postClicks,
+        preRank: req.body.preRank,
+        postRank: req.body.postRank,
       });
       return res.json({ verification });
     }
@@ -152,17 +165,21 @@ router.post('/:id/verify', async (req: Request, res: Response) => {
 // --- Action Approval Center Endpoints ---
 
 // GET /api/actions/approval-center/queue
-router.get('/approval-center/queue', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/approval-center/queue', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.query.websiteId as string);
+  if (!websiteId) {
+    return res.status(400).json({ error: 'websiteId required' });
+  }
   const state = req.query.state as ApprovalState | undefined;
   const items = await ActionApprovalCenter.getApprovalQueue(websiteId, state);
   return res.json({ items });
 });
 
 // POST /api/actions/approval-center/propose
-router.post('/approval-center/propose', async (req: Request, res: Response) => {
+router.post('/approval-center/propose', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = (req.headers['x-website-id'] as string) || (req.body.websiteId as string) || 'site-techscale-prod';
+    const websiteId = req.website?.id || req.body.websiteId;
+    const userId = req.principal?.userId || 'SYSTEM_DIAGNOSIS_ENGINE';
     const item = await ActionApprovalCenter.proposeAction({
       websiteId,
       actionType: req.body.actionType,
@@ -171,7 +188,7 @@ router.post('/approval-center/propose', async (req: Request, res: Response) => {
       payload: req.body.payload || {},
       opportunityScore: req.body.opportunityScore,
       riskLevel: req.body.riskLevel,
-      proposedBy: req.body.proposedBy,
+      proposedBy: req.body.proposedBy || userId,
     });
     return res.json({ item });
   } catch (err: any) {
@@ -180,9 +197,9 @@ router.post('/approval-center/propose', async (req: Request, res: Response) => {
 });
 
 // POST /api/actions/approval-center/:id/approve
-router.post('/approval-center/:id/approve', async (req: Request, res: Response) => {
+router.post('/approval-center/:id/approve', requireWorkspaceAuth('ADMIN'), async (req: Request, res: Response) => {
   try {
-    const userId = (req.headers['x-user-id'] as string) || 'usr-admin-01';
+    const userId = req.principal?.userId || 'ADMIN';
     const item = await ActionApprovalCenter.approveAction({
       actionId: req.params.id,
       userId,
@@ -195,9 +212,9 @@ router.post('/approval-center/:id/approve', async (req: Request, res: Response) 
 });
 
 // POST /api/actions/approval-center/:id/reject
-router.post('/approval-center/:id/reject', async (req: Request, res: Response) => {
+router.post('/approval-center/:id/reject', requireWorkspaceAuth('ADMIN'), async (req: Request, res: Response) => {
   try {
-    const userId = (req.headers['x-user-id'] as string) || 'usr-admin-01';
+    const userId = req.principal?.userId || 'ADMIN';
     const item = await ActionApprovalCenter.rejectAction({
       actionId: req.params.id,
       userId,
@@ -210,20 +227,23 @@ router.post('/approval-center/:id/reject', async (req: Request, res: Response) =
 });
 
 // GET /api/actions/approval-center/:id/logs
-router.get('/approval-center/:id/logs', async (req: Request, res: Response) => {
+router.get('/approval-center/:id/logs', requireWorkspaceAuth('VIEWER'), async (req: Request, res: Response) => {
   const logs = await ActionApprovalCenter.getTransitionLogs(req.params.id);
   return res.json({ logs });
 });
 
 // GET /api/actions/rollback-history
-router.get('/rollback-history', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/rollback-history', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.query.websiteId as string);
+  if (!websiteId) {
+    return res.status(400).json({ error: 'websiteId required' });
+  }
   const history = await ActionSnapshotService.getRollbackHistory(websiteId);
   return res.json({ history });
 });
 
 // POST /api/actions/watchdog/scan
-router.post('/watchdog/scan', async (req: Request, res: Response) => {
+router.post('/watchdog/scan', requireWorkspaceAuth('ADMIN'), async (req: Request, res: Response) => {
   try {
     const { executingTimeoutMs, verifyingTimeoutMs, policyMode, explicitStrategy } = req.body || {};
     const result = await StuckExecutionWatchdog.scanAndResolveStuckActions({
@@ -239,7 +259,7 @@ router.post('/watchdog/scan', async (req: Request, res: Response) => {
 });
 
 // POST /api/actions/watchdog/resolve
-router.post('/watchdog/resolve', async (req: Request, res: Response) => {
+router.post('/watchdog/resolve', requireWorkspaceAuth('ADMIN'), async (req: Request, res: Response) => {
   try {
     const { actionId, strategy, reason } = req.body || {};
     if (!actionId || !strategy) {
@@ -253,8 +273,11 @@ router.post('/watchdog/resolve', async (req: Request, res: Response) => {
 });
 
 // GET /api/actions
-router.get('/', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.query.websiteId as string);
+  if (!websiteId) {
+    return res.status(400).json({ error: 'websiteId required' });
+  }
   const executions = await prisma.actionExecution.findMany({
     where: { websiteId },
     include: { verifications: true, task: true, recommendation: true },
