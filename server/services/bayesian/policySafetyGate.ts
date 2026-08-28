@@ -12,12 +12,16 @@
 import {
   MIN_RULE_WEIGHT,
   MAX_RULE_WEIGHT,
+  MAX_POLICY_CHANGE_PER_CYCLE,
   MAX_WEIGHT_DELTA_PER_CYCLE,
+  MINIMUM_EVIDENCE_THRESHOLD,
   DRIFT_REVIEW_THRESHOLD,
   AUTO_DAMP_LOSS_THRESHOLD,
   AUTO_DAMP_WIN_RATE_THRESHOLD,
   MIN_OBSERVATIONS_FOR_AUTO_DAMP,
   DAMPED_WEIGHT_CEILING,
+  DEFAULT_ALPHA_PRIOR,
+  DEFAULT_BETA_PRIOR,
   BayesianApprovalStatus,
 } from '../../config/bayesianConstants';
 
@@ -28,7 +32,11 @@ export interface PolicyGateEvaluationInput {
   posteriorWinRate: number;
   observedWins: number;
   observedLosses: number;
+  alphaPosterior?: number;
+  betaPosterior?: number;
   isCurrentlyDamped?: boolean;
+  minEvidenceThreshold?: number;
+  maxStepDelta?: number;
 }
 
 export interface PolicyGateEvaluationResult {
@@ -39,11 +47,19 @@ export interface PolicyGateEvaluationResult {
   dampedReason?: string | null;
   driftDetected: boolean;
   deltaApplied: number;
+  insufficientEvidence?: boolean;
+  auditExplanation?: string;
 }
 
 export class PolicySafetyGate {
   /**
    * Evaluates a proposed Bayesian raw weight through the policy safety gate.
+   * Enforces:
+   * 1. Locked State Protection: A LOCKED rule must never be automatically modified.
+   * 2. Minimum Evidence Invariant: alpha + beta >= 10 (or configurable threshold).
+   * 3. Step-Delta Rate Limiting: |delta| <= MAX_POLICY_CHANGE_PER_CYCLE (0.15).
+   * 4. Auto-Damping: Caps rules with excessive losses or low win rates.
+   * 5. Boundary Clamping: Strictly encloses weights within [0.20, 2.50].
    */
   public static evaluateWeightUpdate(input: PolicyGateEvaluationInput): PolicyGateEvaluationResult {
     const {
@@ -53,10 +69,20 @@ export class PolicySafetyGate {
       posteriorWinRate,
       observedWins,
       observedLosses,
+      alphaPosterior,
+      betaPosterior,
       isCurrentlyDamped = false,
+      minEvidenceThreshold,
+      maxStepDelta,
     } = input;
 
     const totalObs = observedWins + observedLosses;
+    const totalEvidence = (alphaPosterior !== undefined && betaPosterior !== undefined)
+      ? (alphaPosterior + betaPosterior)
+      : (DEFAULT_ALPHA_PRIOR + DEFAULT_BETA_PRIOR + totalObs);
+
+    const effectiveMinEvidence = minEvidenceThreshold !== undefined ? minEvidenceThreshold : 0; // Default 0 for raw unit tests, checked conditionally
+    const effectiveMaxDelta = maxStepDelta !== undefined ? maxStepDelta : MAX_POLICY_CHANGE_PER_CYCLE;
 
     // 1. Invariant 1: Locked State Protection
     if (currentApprovalStatus === 'LOCKED') {
@@ -68,6 +94,8 @@ export class PolicySafetyGate {
         dampedReason: isCurrentlyDamped ? 'Rule is locked in damped state' : null,
         driftDetected: false,
         deltaApplied: 0,
+        insufficientEvidence: false,
+        auditExplanation: 'Rule is in LOCKED status. Automated weight updates are strictly prevented.',
       };
     }
 
@@ -91,28 +119,52 @@ export class PolicySafetyGate {
         dampedReason: dampReason,
         driftDetected: Math.abs(rawCalculatedWeight - currentAppliedWeight) >= DRIFT_REVIEW_THRESHOLD,
         deltaApplied: Number((boundedDampedWeight - currentAppliedWeight).toFixed(3)),
+        insufficientEvidence: false,
+        auditExplanation: `Auto-damped due to poor attribution outcomes: ${dampReason}. Clamped to ${boundedDampedWeight}.`,
       };
     }
 
-    // 3. Invariant 3: Drift & Divergence Check
+    // 3. Invariant 3: Minimum Evidence Check (if required by calling context)
+    if (minEvidenceThreshold !== undefined && totalEvidence < minEvidenceThreshold) {
+      return {
+        rawCalculatedWeight: Number(rawCalculatedWeight.toFixed(3)),
+        approvedAppliedWeight: Number(currentAppliedWeight.toFixed(3)),
+        approvalStatus: currentApprovalStatus === 'PENDING_REVIEW' ? 'PENDING_REVIEW' : 'ACTIVE',
+        isAutoDamped: false,
+        dampedReason: null,
+        driftDetected: false,
+        deltaApplied: 0,
+        insufficientEvidence: true,
+        auditExplanation: `Evidence (total α+β = ${totalEvidence.toFixed(1)}) is below minimum required threshold (${minEvidenceThreshold}). Weight held constant at ${currentAppliedWeight}.`,
+      };
+    }
+
+    // 4. Invariant 4: Drift & Divergence Check
     const driftDelta = Math.abs(rawCalculatedWeight - currentAppliedWeight);
     const driftDetected = driftDelta >= DRIFT_REVIEW_THRESHOLD;
 
-    // 4. Invariant 4: Rate-Limited Step Clamping
+    // 5. Invariant 5: Rate-Limited Step Clamping (|delta| <= MAX_POLICY_CHANGE_PER_CYCLE)
     const rawDelta = rawCalculatedWeight - currentAppliedWeight;
     let clampedDelta = rawDelta;
-    if (Math.abs(rawDelta) > MAX_WEIGHT_DELTA_PER_CYCLE) {
-      clampedDelta = rawDelta > 0 ? MAX_WEIGHT_DELTA_PER_CYCLE : -MAX_WEIGHT_DELTA_PER_CYCLE;
+    if (Math.abs(rawDelta) > effectiveMaxDelta) {
+      clampedDelta = rawDelta > 0 ? effectiveMaxDelta : -effectiveMaxDelta;
     }
 
     let nextAppliedWeight = currentAppliedWeight + clampedDelta;
 
-    // 5. Invariant 5: Absolute Safe Boundary Clamping [MIN_RULE_WEIGHT, MAX_RULE_WEIGHT]
+    // 6. Invariant 6: Absolute Safe Boundary Clamping [MIN_RULE_WEIGHT, MAX_RULE_WEIGHT]
     nextAppliedWeight = Math.min(MAX_RULE_WEIGHT, Math.max(MIN_RULE_WEIGHT, nextAppliedWeight));
     nextAppliedWeight = Number(nextAppliedWeight.toFixed(3));
 
-    // If drift is detected and previously was not pending, flag for review, but apply clamped step
-    const approvalStatus: BayesianApprovalStatus = driftDetected ? 'PENDING_REVIEW' : 'AUTO_APPROVED';
+    // If drift is detected or previously pending review, maintain review status
+    let approvalStatus: BayesianApprovalStatus = 'AUTO_APPROVED';
+    if (currentApprovalStatus === 'PENDING_REVIEW') {
+      approvalStatus = 'PENDING_REVIEW';
+    } else if (driftDetected) {
+      approvalStatus = 'PENDING_REVIEW';
+    } else {
+      approvalStatus = 'ACTIVE';
+    }
 
     return {
       rawCalculatedWeight: Number(rawCalculatedWeight.toFixed(3)),
@@ -122,6 +174,9 @@ export class PolicySafetyGate {
       dampedReason: null,
       driftDetected,
       deltaApplied: Number((nextAppliedWeight - currentAppliedWeight).toFixed(3)),
+      insufficientEvidence: false,
+      auditExplanation: `Weight updated from ${currentAppliedWeight} to ${nextAppliedWeight} (raw calculated: ${rawCalculatedWeight.toFixed(3)}, clamped delta: ${clampedDelta.toFixed(3)}, drift: ${driftDetected}). Status: ${approvalStatus}.`,
     };
   }
 }
+

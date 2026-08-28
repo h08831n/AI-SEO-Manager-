@@ -3,9 +3,7 @@ import { getRedisConnection } from '../config/redis';
 import { prisma } from '../db/prisma';
 import { ActionJobData } from './actionQueueProducer';
 import { ActionOrchestrationService } from '../services/action/actionOrchestrationService';
-import { SignalAggregatorService } from '../services/decision/signalAggregator';
-import { DiagnosisEngine } from '../services/decision/diagnosisEngine';
-import { RecommendationSynthesizer } from '../services/decision/recommendationSynthesizer';
+import { DecisionEvaluationService } from '../services/decision/decisionEvaluationService';
 
 export class ActionQueueConsumer {
   private static worker: Worker<ActionJobData> | null = null;
@@ -28,9 +26,7 @@ export class ActionQueueConsumer {
 
         try {
           if (jobType === 'EVALUATE_DECISIONS') {
-            const contexts = await SignalAggregatorService.aggregateProblemContexts(websiteId);
-            const opportunities = DiagnosisEngine.evaluateContexts(contexts);
-            await RecommendationSynthesizer.synthesizeAndPersist(websiteId, opportunities);
+            await DecisionEvaluationService.evaluateDecisions({ websiteId });
           } else if (jobType === 'EXECUTE_ACTION') {
             if (!actionType || !targetUrl || !payload || !idempotencyKey) {
               throw new Error('Missing required action execution parameters in queue job');
@@ -91,3 +87,4 @@ export class ActionQueueConsumer {
     }
   }
 }
+

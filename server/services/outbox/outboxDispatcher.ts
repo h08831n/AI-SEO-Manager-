@@ -349,44 +349,13 @@ export class OutboxDispatcher {
   }
 
   public static async processSingleEvent(
-    _eventId: string,
+    eventId: string,
     eventType: string,
-    payload: any
+    payload: any,
+    record?: OutboxEventRecord
   ): Promise<void> {
-    if (eventType === 'CRAWL_REQUESTED') {
-      const { websiteId, crawlRunId, config, correlationId } = payload;
-
-      if (process.env.REDIS_URL) {
-        await CrawlerQueueProducer.enqueueCoordinatorJob(websiteId, crawlRunId, config, correlationId);
-        await CrawlRepository.updateCrawlRun(crawlRunId, { status: 'QUEUED' });
-      } else {
-        if (isProductionMode()) {
-          throw new Error('REDIS_URL required in PRODUCTION mode to dispatch crawl jobs.');
-        }
-
-        setImmediate(async () => {
-          try {
-            await CrawlRepository.updateCrawlRun(crawlRunId, {
-              status: 'RUNNING',
-              startedAt: new Date().toISOString(),
-            });
-            await CrawlCoordinator.executeCrawl(config, crawlRunId);
-          } catch (err: any) {
-            console.error(`[OutboxDispatcher] DEV background crawl execution failed for ${crawlRunId}:`, err);
-            await CrawlRepository.updateCrawlRun(crawlRunId, {
-              status: 'FAILED',
-              completedAt: new Date().toISOString(),
-            });
-          }
-        });
-      }
-    } else if (eventType === 'ATTRIBUTION_EVALUATION_REQUESTED') {
-      try {
-        const { AttributionEvaluationWorker } = await import('../worker/attributionEvaluationWorker');
-        await AttributionEvaluationWorker.handleEvent(eventType, payload);
-      } catch (err) {
-        console.error(`[OutboxDispatcher] Attribution evaluation handling failed:`, err);
-      }
-    }
+    const { EventHandlerRegistry } = await import('./eventHandlerRegistry');
+    await EventHandlerRegistry.dispatch(eventId, eventType, payload, record);
   }
 }
+

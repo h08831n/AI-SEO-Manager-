@@ -1,10 +1,9 @@
 import { Router, Request, Response } from 'express';
-import { SignalAggregatorService } from '../services/decision/signalAggregator';
-import { DiagnosisEngine } from '../services/decision/diagnosisEngine';
-import { RecommendationSynthesizer } from '../services/decision/recommendationSynthesizer';
+import { DecisionEvaluationService } from '../services/decision/decisionEvaluationService';
 import { DiagnosisRuleCatalog } from '../services/decision/rules/diagnosisRuleCatalog';
 import { LearningLoopEngine } from '../services/decision/learningLoopEngine';
 import { ActionQueueProducer } from '../queues/actionQueueProducer';
+import { RuleWeightResolver } from '../services/bayesian/ruleWeightResolver';
 
 const router = Router();
 
@@ -22,17 +21,17 @@ router.post('/evaluate', async (req: Request, res: Response) => {
       return res.json({ status: 'QUEUED', jobId, deduplicated });
     }
 
-    const contexts = await SignalAggregatorService.aggregateProblemContexts(websiteId);
-    const opportunities = DiagnosisEngine.evaluateContexts(contexts);
-    const result = await RecommendationSynthesizer.synthesizeAndPersist(websiteId, opportunities);
-
-    return res.json({
-      status: 'COMPLETED',
-      evaluatedContextsCount: contexts.length,
-      opportunitiesCount: opportunities.length,
-      persisted: result,
-      topOpportunities: opportunities.slice(0, 10),
+    const result = await DecisionEvaluationService.evaluateDecisions({
+      websiteId,
+      targetUrl: req.body.targetUrl,
+      targetKeyword: req.body.targetKeyword,
+      cmsProvider: req.body.cmsProvider,
+      pageArchetype: req.body.pageArchetype,
+      persist: req.body.persist !== false,
+      correlationId: req.body.correlationId || (req.headers['x-correlation-id'] as string),
     });
+
+    return res.json(result);
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -40,6 +39,7 @@ router.post('/evaluate', async (req: Request, res: Response) => {
 
 // GET /api/decision/rules
 router.get('/rules', async (req: Request, res: Response) => {
+  const websiteId = (req.headers['x-website-id'] as string) || (req.query.websiteId as string);
   const rules = DiagnosisRuleCatalog.getAllRules().map((r) => ({
     id: r.id,
     version: r.version,
@@ -50,8 +50,15 @@ router.get('/rules', async (req: Request, res: Response) => {
     baseEffort: r.baseEffort,
     baseRisk: r.baseRisk,
   }));
+
+  if (websiteId) {
+    const weights = await RuleWeightResolver.resolveWeightsForRules(websiteId, rules.map((r) => r.id));
+    return res.json({ rules, resolvedWeights: weights });
+  }
+
   return res.json({ rules });
 });
+
 
 // GET /api/decision/learning-stats
 router.get('/learning-stats', async (req: Request, res: Response) => {

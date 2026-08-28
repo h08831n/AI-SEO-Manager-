@@ -220,6 +220,7 @@ export class SyntheticControlEngine {
 
   /**
    * Persists synthetic control matches to the database for causal reference.
+   * Ensures idempotency by removing prior matches for the attributionFactId if present.
    */
   public static async persistControlMatches(
     websiteId: string,
@@ -227,6 +228,16 @@ export class SyntheticControlEngine {
     matches: SyntheticControlMatchResult[],
     attributionFactId?: string
   ): Promise<void> {
+    if (attributionFactId) {
+      try {
+        await prisma.syntheticControlMatch.deleteMany({
+          where: { attributionFactId },
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     for (const m of matches) {
       await prisma.syntheticControlMatch.create({
         data: {
@@ -245,3 +256,4 @@ export class SyntheticControlEngine {
     }
   }
 }
+
