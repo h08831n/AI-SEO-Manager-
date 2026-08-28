@@ -17,10 +17,11 @@ describe('P0 Closed-Loop Hardening Verification Suite', () => {
       update: { domain: 'hardening-test.com' },
       create: {
         id: testSiteId,
+        workspaceId: 'ws-hardening-p0',
         domain: 'hardening-test.com',
-        businessCategory: 'SaaS',
-        riskTier: 'STANDARD',
-        autonomyMode: 'ASSISTED',
+        name: 'Hardening Test Site',
+        productionUrl: 'https://hardening-test.com',
+        industry: 'SaaS',
       },
     });
   });

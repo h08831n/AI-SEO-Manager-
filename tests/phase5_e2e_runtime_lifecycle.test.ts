@@ -21,10 +21,11 @@ describe('Phase 5 Complete End-to-End Runtime Lifecycle Test', () => {
       update: { domain: 'hardening.techscale.io' },
       create: {
         id: websiteId,
+        workspaceId: 'ws-e2e-hardened',
         domain: 'hardening.techscale.io',
-        businessCategory: 'Tech',
-        riskTier: 'STANDARD',
-        autonomyMode: 'FULL_AUTO',
+        name: 'Hardening TechScale',
+        productionUrl: 'https://hardening.techscale.io',
+        industry: 'Tech',
       },
     });
   });

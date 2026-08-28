@@ -4,6 +4,9 @@ import { SyntheticControlEngine } from './syntheticControlEngine';
 import { OutboxDispatcher } from '../outbox/outboxDispatcher';
 import {
   ATTRIBUTION_MODEL_VERSION,
+  ATTRIBUTION_LAG_DAYS,
+  ATTRIBUTION_WINDOW_DAYS,
+  MINIMUM_OBSERVATION_COMPLETENESS,
   MIN_ATTRIBUTION_HORIZON_DAYS,
   ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD,
   ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD,
@@ -12,6 +15,7 @@ import {
   LOSS_CLICK_LIFT_DELTA_THRESHOLD,
   LOSS_RANK_DELTA_THRESHOLD,
   SERP_VOLATILITY_PENALTY_MULTIPLIER,
+  AttributionOutcomeCategory,
   buildAttributionEvaluationKey,
 } from '../../config/attributionConstants';
 
@@ -28,7 +32,7 @@ export interface AttributionEvaluationResult {
   websiteId: string;
   urlIdentityId: string;
   primaryKeywordId?: string;
-  outcomeCategory: 'WIN' | 'LOSS' | 'NEUTRAL' | 'INCONCLUSIVE';
+  outcomeCategory: AttributionOutcomeCategory;
   confidenceScore: number;
   netCausalLift: number;
   syntheticControlDelta: number;
@@ -55,7 +59,7 @@ export class CausalAttributionEngine {
     const evaluationHorizonDays =
       typeof horizonOrOptions === 'number'
         ? horizonOrOptions
-        : horizonOrOptions.evaluationHorizonDays ?? 30;
+        : horizonOrOptions.evaluationHorizonDays ?? ATTRIBUTION_WINDOW_DAYS;
     const modelVersion =
       typeof horizonOrOptions === 'object' && horizonOrOptions.modelVersion
         ? horizonOrOptions.modelVersion
@@ -78,14 +82,13 @@ export class CausalAttributionEngine {
       throw new Error(`Cannot evaluate attribution: URL Identity could not be resolved for '${actionExecutionId}'`);
     }
 
-    // 2. Define Temporal Windows (Pre: T-30d to T, Post: T+14d to T+horizon)
+    // 2. Define Equal Temporal Windows (Pre: T-30d to T, Post: T+14d to T+30d)
     const executionDate = new Date(executedAt);
-    const baselineStartDate = new Date(executionDate.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const evaluationStartDate = new Date(executionDate.getTime() + 14 * 24 * 60 * 60 * 1000); // 14-day lag
+    const baselineStartDate = new Date(executionDate.getTime() - evaluationHorizonDays * 24 * 60 * 60 * 1000);
+    const evaluationStartDate = new Date(executionDate.getTime() + ATTRIBUTION_LAG_DAYS * 24 * 60 * 60 * 1000); // 14-day lag
     const evaluationEndDate = new Date(executionDate.getTime() + evaluationHorizonDays * 24 * 60 * 60 * 1000);
 
-    const preDays = Math.max(1, Math.round((executionDate.getTime() - baselineStartDate.getTime()) / (24 * 60 * 60 * 1000)));
-    const postDays = Math.max(1, Math.round((evaluationEndDate.getTime() - evaluationStartDate.getTime()) / (24 * 60 * 60 * 1000)));
+    const now = new Date();
 
     // 3. Treatment Group Metrics (Pre & Post)
     const treatmentPreFacts = await prisma.gscSearchAnalyticsFact.findMany({
@@ -104,13 +107,16 @@ export class CausalAttributionEngine {
       },
     });
 
+    const preObservedDays = treatmentPreFacts.length;
+    const postObservedDays = treatmentPostFacts.length;
+
     const preClicks = treatmentPreFacts.reduce((sum, f) => sum + f.clicks, 0);
     const postClicks = treatmentPostFacts.reduce((sum, f) => sum + f.clicks, 0);
-    const clickLiftDelta = Number((postClicks - preClicks).toFixed(2));
+    const clickLiftDelta = postClicks - preClicks;
 
     const preImpressions = treatmentPreFacts.reduce((sum, f) => sum + f.impressions, 0);
     const postImpressions = treatmentPostFacts.reduce((sum, f) => sum + f.impressions, 0);
-    const impressionLiftDelta = Number((postImpressions - preImpressions).toFixed(2));
+    const impressionLiftDelta = postImpressions - preImpressions;
 
     const preCtr = preImpressions > 0 ? Number((preClicks / preImpressions).toFixed(4)) : 0.0;
     const postCtr = postImpressions > 0 ? Number((postClicks / postImpressions).toFixed(4)) : 0.0;
@@ -200,16 +206,12 @@ export class CausalAttributionEngine {
     const netCausalLift = Number((clickLiftDelta - syntheticControlDelta).toFixed(2));
 
     // 7. Deterministic Confidence Score (0.0 to 1.0)
-    // Based on:
-    // a. Control twin presence and similarity scores (weight 0.40)
-    // b. Pre-period & post-period data density (weight 0.35)
-    // c. Magnitude of metric signal clarity (weight 0.25)
     const avgControlSimilarity =
       controlMatches.length > 0
         ? controlMatches.reduce((sum, m) => sum + m.similarityScore, 0) / controlMatches.length
         : 0.0;
     const totalFactsCount = treatmentPreFacts.length + treatmentPostFacts.length;
-    const dataDensityScore = Math.min(1.0, totalFactsCount / 30);
+    const dataDensityScore = Math.min(1.0, totalFactsCount / 2);
     const signalClarityScore = Math.min(1.0, Math.abs(netCausalLift) / 20 + Math.abs(rankDelta) / 5);
 
     let confidenceScore = Number(
@@ -223,29 +225,25 @@ export class CausalAttributionEngine {
       );
     }
 
-    // 8. Outcome Category Classification with INCONCLUSIVE & Confidence Thresholds
-    let outcomeCategory: 'WIN' | 'LOSS' | 'NEUTRAL' | 'INCONCLUSIVE' = 'NEUTRAL';
+    // 8. Outcome Category Classification with Maturity & Completeness Gating
+    let outcomeCategory: AttributionOutcomeCategory = 'NEUTRAL';
 
-    // Inconclusive conditions:
-    // 1. Observation window is too short (< 14 days)
-    // 2. Insufficient data points (e.g. 0 pre or post facts, or pre impressions = 0 and post impressions = 0)
-    // 3. No viable control twins found (controlMatches.length === 0)
-    // 4. Extreme SERP volatility detected during evaluation window
-    // 5. Confidence score falls below the required threshold for deterministic attribution
     const isShortWindow = evaluationHorizonDays < MIN_ATTRIBUTION_HORIZON_DAYS;
-    const isInsufficientData = treatmentPreFacts.length === 0 && treatmentPostFacts.length === 0;
-    const isMissingControlGroup = controlMatches.length === 0;
 
-    if (
+    if (now < evaluationStartDate) {
+      outcomeCategory = 'PENDING_DATA';
+    } else if (now < evaluationEndDate) {
+      outcomeCategory = 'MEASURING';
+    } else if (
       isShortWindow ||
-      isInsufficientData ||
-      isMissingControlGroup ||
+      preObservedDays === 0 ||
+      postObservedDays === 0 ||
+      controlMatches.length === 0 ||
       isSerpVolatile ||
       confidenceScore < ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD
     ) {
       outcomeCategory = 'INCONCLUSIVE';
     } else {
-      // Explicit confidence thresholds required for WIN/LOSS assignment (confidence >= 0.50)
       const isConfident = confidenceScore >= ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD;
 
       if (
@@ -382,27 +380,29 @@ export class CausalAttributionEngine {
       });
     }
 
-    // 13. Emit Outbox Event for downstream Bayesian learning and canary watchdogs
-    await OutboxDispatcher.recordEvent({
-      aggregateType: 'ATTRIBUTION_FACT',
-      aggregateId: attributionFact.id,
-      eventType: 'ATTRIBUTION_EVALUATION_COMPLETED',
-      payload: {
-        attributionFactId: attributionFact.id,
-        actionExecutionId,
-        evaluationKey,
-        modelVersion,
-        websiteId,
-        ruleKey,
-        cmsProvider,
-        pageArchetype,
-        outcomeCategory,
-        netCausalLift,
-        rankDelta,
-        confidenceScore,
-        evaluationEndDate: evaluationEndDate.toISOString(),
-      },
-    });
+    // 13. Emit Outbox Event only for mature WIN / LOSS outcomes to feed Bayesian learning
+    if (outcomeCategory === 'WIN' || outcomeCategory === 'LOSS') {
+      await OutboxDispatcher.recordEvent({
+        aggregateType: 'ATTRIBUTION_FACT',
+        aggregateId: attributionFact.id,
+        eventType: 'ATTRIBUTION_EVALUATION_COMPLETED',
+        payload: {
+          attributionFactId: attributionFact.id,
+          actionExecutionId,
+          evaluationKey,
+          modelVersion,
+          websiteId,
+          ruleKey,
+          cmsProvider,
+          pageArchetype,
+          outcomeCategory,
+          netCausalLift,
+          rankDelta,
+          confidenceScore,
+          evaluationEndDate: evaluationEndDate.toISOString(),
+        },
+      });
+    }
 
     return {
       attributionFactId: attributionFact.id,
@@ -475,4 +475,3 @@ export class CausalAttributionEngine {
     };
   }
 }
-

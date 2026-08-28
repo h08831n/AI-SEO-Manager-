@@ -41,7 +41,10 @@ export class AttributionQueueProducer {
     data: AttributionJobData
   ): Promise<{ jobId: string; deduplicated: boolean }> {
     const queue = this.getQueue();
-    const jobId = `attr-${data.websiteId}-${data.actionExecutionId || 'batch'}-${Date.now()}`;
+    const horizon = data.horizonDays || 30;
+    const jobId = data.actionExecutionId
+      ? `attr-eval-${data.websiteId}-${data.actionExecutionId}-${horizon}`
+      : `attr-batch-${data.websiteId}-${Date.now()}`;
 
     // Deduplication check in DB job runs
     const existingJob = await prisma.jobRun.findFirst({

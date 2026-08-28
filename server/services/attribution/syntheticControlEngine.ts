@@ -74,12 +74,14 @@ export class SyntheticControlEngine {
 
     // Fetch treatment pre-period metrics (T - 30d to T)
     const baselineStartDate = new Date(executionDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const evaluationEndDate = new Date(executionDate.getTime() + 44 * 24 * 60 * 60 * 1000); // 14 lag + 30 post
     const treatmentGscFacts = await prisma.gscSearchAnalyticsFact.findMany({
       where: {
         websiteId,
         urlIdentityId: treatmentUrlId,
         date: { gte: baselineStartDate, lte: executionDate },
       },
+      orderBy: { date: 'asc' },
     });
 
     const treatmentPreClicks = treatmentGscFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
@@ -98,13 +100,11 @@ export class SyntheticControlEngine {
       return [];
     }
 
-    // 3. Collect exclusion sets
-    // A: URLs with an ActionExecution in prior 60 days
-    const sixtyDaysBefore = new Date(executionDate.getTime() - 60 * 24 * 60 * 60 * 1000);
+    // 3. Collect exclusion sets: URLs with ActionExecution anywhere in baseline, treatment lag, or observation period
     const activeActionExecutions = await prisma.actionExecution.findMany({
       where: {
         websiteId,
-        executedAt: { gte: sixtyDaysBefore },
+        executedAt: { gte: baselineStartDate, lte: evaluationEndDate },
       },
       select: { targetUrl: true },
     });
@@ -121,9 +121,30 @@ export class SyntheticControlEngine {
 
     const scoredCandidates: SyntheticControlMatchResult[] = [];
 
+    // Helper: Calculate linear regression slope of daily clicks time series
+    const calcTrendSlope = (facts: Array<{ date: Date | string; clicks: number }>): number => {
+      if (facts.length < 2) return 0.0;
+      const n = facts.length;
+      let sumX = 0;
+      let sumY = 0;
+      let sumXY = 0;
+      let sumXX = 0;
+      for (let i = 0; i < n; i++) {
+        const y = facts[i].clicks || 0;
+        sumX += i;
+        sumY += y;
+        sumXY += i * y;
+        sumXX += i * i;
+      }
+      const denom = n * sumXX - sumX * sumX;
+      return denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0.0;
+    };
+
+    const treatmentSlope = calcTrendSlope(treatmentGscFacts);
+
     // 4. Score each candidate
     for (const candidate of candidates) {
-      // Exclusion 1: Recent action executions
+      // Exclusion 1: Recent action executions (contaminated)
       if (excludedUrlsSet.has(candidate.normalizedUrl)) {
         continue;
       }
@@ -154,6 +175,7 @@ export class SyntheticControlEngine {
           urlIdentityId: candidate.id,
           date: { gte: baselineStartDate, lte: executionDate },
         },
+        orderBy: { date: 'asc' },
       });
 
       const candidatePreClicks = candidateGscFacts.reduce((sum, f) => sum + (f.clicks || 0), 0);
@@ -180,9 +202,10 @@ export class SyntheticControlEngine {
       const logDiff = Math.abs(logTreat - logCand);
       const featureVolumeScore = Math.max(0, 1.0 - Math.min(1.0, logDiff / 2.0));
 
-      // --- Feature 3: Pre-Period Baseline Velocity & Stability (0 to 1.0) ---
-      // Measure week-over-week click velocity delta
-      const featureSlopeScore = Math.max(0.1, 1.0 - Math.min(1.0, Math.abs(treatmentPreClicks - candidatePreClicks) / Math.max(10, treatmentPreClicks + 1)));
+      // --- Feature 3: Pre-Period Baseline Trend & Linear Slope Matching (0 to 1.0) ---
+      const candidateSlope = calcTrendSlope(candidateGscFacts);
+      const slopeDelta = Math.abs(treatmentSlope - candidateSlope);
+      const featureSlopeScore = Math.max(0.1, 1.0 - Math.min(1.0, slopeDelta / (Math.abs(treatmentSlope) + 1.0)));
 
       // --- Feature 4: Internal Link In-Degree Graph Proximity (0 to 1.0) ---
       const linkDiff = Math.abs(treatmentInlinks - candidateInlinks);

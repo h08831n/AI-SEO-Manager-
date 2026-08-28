@@ -4,6 +4,11 @@
 
 export const ATTRIBUTION_MODEL_VERSION = 'causal-did-v1';
 
+// Canonical Observation Windows & Lags
+export const ATTRIBUTION_LAG_DAYS = 14;
+export const ATTRIBUTION_WINDOW_DAYS = 30;
+export const MINIMUM_OBSERVATION_COMPLETENESS = 0.80; // 80% daily data completeness required per window
+
 // Minimum observation horizon (days) required for valid attribution inference
 export const MIN_ATTRIBUTION_HORIZON_DAYS = 14;
 
@@ -23,6 +28,15 @@ export const LOSS_RANK_DELTA_THRESHOLD = -1.5; // <= -1.5 positions
 
 // Volatility dampening
 export const SERP_VOLATILITY_PENALTY_MULTIPLIER = 0.50;
+
+// Valid Outcome Category States
+export type AttributionOutcomeCategory =
+  | 'PENDING_DATA'
+  | 'MEASURING'
+  | 'WIN'
+  | 'LOSS'
+  | 'NEUTRAL'
+  | 'INCONCLUSIVE';
 
 /**
  * Deterministic Version-Aware Evaluation Key Generator

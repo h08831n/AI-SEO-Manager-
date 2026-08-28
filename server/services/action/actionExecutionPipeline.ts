@@ -23,6 +23,7 @@ import { ActionSnapshotService } from './snapshots/actionSnapshotService';
 import { OutboxDispatcher } from '../outbox/outboxDispatcher';
 import { ActionApprovalCenter } from './approval/actionApprovalCenter';
 import { LearningLoopEngine } from '../decision/learningLoopEngine';
+import { AttributionQueueProducer } from '../../queues/attributionQueueProducer';
 
 export type ActionExecutionMode = 'MANUAL' | 'AUTONOMOUS' | 'CANARY';
 export type ActionRiskTier = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -43,6 +44,8 @@ export interface ActionExecutionPipelineParams {
   platform?: string;
   correlationId?: string;
 }
+
+export type ActionPipelineInput = ActionExecutionPipelineParams;
 
 export interface ActionExecutionPipelineResult {
   success: boolean;
@@ -171,13 +174,13 @@ export class ActionExecutionPipeline {
       userRole,
     });
 
-    if (!governance.allowed) {
+    if (!isDryRun && !governance.allowed) {
       throw new Error(`GOVERNANCE_BLOCKED: ${governance.reason}`);
     }
 
     // High and Critical risk actions MUST have human approval if running autonomously
     let boundApprovalId: string | undefined;
-    if (isAutonomous && (riskTier === 'CRITICAL' || riskTier === 'HIGH')) {
+    if (!isDryRun && isAutonomous && (riskTier === 'CRITICAL' || riskTier === 'HIGH')) {
       const priorApproval = await prisma.actionApprovalRequest.findFirst({
         where: {
           websiteId,
@@ -258,16 +261,15 @@ export class ActionExecutionPipeline {
         targetUrl,
         idempotencyKey,
         state: ActionStatus.EXECUTING,
-        appliedPayloadJson: JSON.stringify(payload),
         beforeEvidenceJson: JSON.stringify(preStateSnapshot),
-        triggeredByUserId: userId,
+        requestedByUserId: userId,
       },
     });
 
     // 10. Execute Mutation through Authoritative Executor
     let execResult: any;
     try {
-      execResult = await executor.apply(target, payload);
+      execResult = await executor.apply(target, payload, preStateSnapshot);
     } catch (execError: any) {
       await prisma.actionExecution.update({
         where: { id: actionExecution.id },
@@ -296,7 +298,7 @@ export class ActionExecutionPipeline {
     await prisma.actionExecution.update({
       where: { id: actionExecution.id },
       data: {
-        state: autoVerify ? ActionStatus.AWAITING_VERIFICATION : ActionStatus.APPLIED,
+        state: autoVerify ? ActionStatus.AWAITING_VERIFICATION : ActionStatus.VERIFIED_COMPLETED,
         afterEvidenceJson: JSON.stringify(execResult.appliedState),
       },
     });
@@ -339,7 +341,7 @@ export class ActionExecutionPipeline {
     if (autoVerify) {
       let ruleKey: string | undefined;
       if (recommendationId) {
-        const rec = await prisma.decisionRecommendation.findUnique({ where: { id: recommendationId } });
+        const rec = await prisma.seoRecommendation.findUnique({ where: { id: recommendationId } });
         ruleKey = rec?.ruleKey || undefined;
       }
 
@@ -420,6 +422,15 @@ export class ActionExecutionPipeline {
         if (boundApprovalId) {
           await ActionApprovalCenter.markVerified(boundApprovalId, userId || 'VERIFIER');
         }
+
+        // Schedule deterministic causal attribution evaluation
+        await AttributionQueueProducer.enqueueAttributionEvaluation({
+          jobType: 'EVALUATE_ATTRIBUTION',
+          websiteId,
+          actionExecutionId: actionExecution.id,
+          horizonDays: 30,
+          correlationId,
+        });
       }
     }
 

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { ISerpProvider, SerpQueryRequest, RawSerpResponse, RawOrganicResult, RawSerpFeatureItem } from './serpProvider';
 import { SerpFeatureType, SerpDevice } from '@prisma/client';
 import { MockSerpProvider } from './mockSerpProvider';
+import { isProductionMode } from '../../../config/runtimeMode';
 
 export class SerpApiAdapter implements ISerpProvider {
   readonly providerName = 'SERPAPI';
@@ -12,9 +13,12 @@ export class SerpApiAdapter implements ISerpProvider {
 
   async fetchSerp(req: SerpQueryRequest): Promise<RawSerpResponse> {
     if (!this.isConfigured()) {
+      if (isProductionMode()) {
+        throw new Error('SERP_PROVIDER_NOT_CONFIGURED: SerpApi API key missing in PRODUCTION mode.');
+      }
       const mock = new MockSerpProvider();
       const res = await mock.fetchSerp(req);
-      return { ...res, provider: this.providerName };
+      return { ...res, provider: this.providerName, dataProvenance: 'MOCK' };
     }
 
     const params = new URLSearchParams({
@@ -102,12 +106,16 @@ export class SerpApiAdapter implements ISerpProvider {
         rawPayloadHash,
         rawJson,
         retrievedAt: new Date(),
+        dataProvenance: 'LIVE',
       };
     } catch (err: any) {
+      if (isProductionMode()) {
+        throw new Error(`SERP_FETCH_FAILED: SerpApi query failed in PRODUCTION mode: ${err.message}`);
+      }
       console.warn(`[SerpApiAdapter] Live call failed, falling back to mock:`, err.message);
       const mock = new MockSerpProvider();
       const res = await mock.fetchSerp(req);
-      return { ...res, provider: this.providerName };
+      return { ...res, provider: this.providerName, dataProvenance: 'MOCK' };
     }
   }
 }

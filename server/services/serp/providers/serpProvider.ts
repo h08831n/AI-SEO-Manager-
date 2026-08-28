@@ -46,6 +46,7 @@ export interface RawSerpResponse {
   rawPayloadHash: string;
   rawJson?: string;
   retrievedAt: Date;
+  dataProvenance?: 'LIVE' | 'MOCK' | 'IMPORTED' | 'SYNTHETIC';
 }
 
 export interface ISerpProvider {
