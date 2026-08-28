@@ -3,7 +3,6 @@
 
 generator client {
   provider = "prisma-client-js"
-  output   = "../node_modules/.prisma/client"
 }
 
 datasource db {
@@ -194,6 +193,9 @@ model Website {
   attributionFacts ActionAttributionFact[]
   syntheticControlMatches SyntheticControlMatch[]
   bayesianRuleWeightStates BayesianRuleWeightState[]
+  bayesianProcessedEvidence BayesianProcessedEvidence[]
+  bayesianRuleEvidenceCursors BayesianRuleEvidenceCursor[]
+  bayesianRecalibrationLocks BayesianRecalibrationLock[]
 
   @@unique([workspaceId, domain])
   @@index([workspaceId])
@@ -1518,6 +1520,7 @@ model ActionAttributionFact {
   primaryKeyword        KeywordUniverse?  @relation(fields: [primaryKeywordId], references: [id], onDelete: SetNull)
   seoEvent              SeoEvent?         @relation(fields: [seoEventId], references: [id], onDelete: SetNull)
   syntheticControls     SyntheticControlMatch[]
+  processedEvidence     BayesianProcessedEvidence[]
 
   @@index([actionExecutionId])
   @@index([websiteId, ruleKey, outcomeCategory])
@@ -1580,9 +1583,61 @@ model BayesianRuleWeightState {
   updatedAt             DateTime          @updatedAt
 
   website               Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  processedEvidence     BayesianProcessedEvidence[]
 
   @@unique([websiteId, ruleKey, cmsProvider, pageArchetype])
   @@index([websiteId, approvedAppliedWeight])
   @@map("bayesian_rule_weight_states")
 }
+
+model BayesianProcessedEvidence {
+  id                    String                 @id @default(uuid())
+  websiteId             String
+  stateId               String
+  attributionFactId     String
+  outcomeCategory       String                 // WIN or LOSS
+  confidenceScore       Float
+  processedAt           DateTime               @default(now())
+
+  website               Website                @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  state                 BayesianRuleWeightState @relation(fields: [stateId], references: [id], onDelete: Cascade)
+  attributionFact       ActionAttributionFact  @relation(fields: [attributionFactId], references: [id], onDelete: Cascade)
+
+  @@unique([stateId, attributionFactId])
+  @@index([websiteId, processedAt])
+  @@index([attributionFactId])
+  @@map("bayesian_processed_evidence")
+}
+
+model BayesianRuleEvidenceCursor {
+  id                    String   @id @default(uuid())
+  websiteId             String
+  ruleKey               String
+  cmsProvider           String   @default("ALL")
+  pageArchetype         String   @default("ALL")
+  lastProcessedFactId   String?
+  lastProcessedFactDate DateTime?
+  processedFactCount    Int      @default(0)
+  lastRecalibratedAt    DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  website               Website  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, ruleKey, cmsProvider, pageArchetype])
+  @@index([websiteId, lastProcessedFactDate])
+  @@map("bayesian_rule_evidence_cursors")
+}
+
+model BayesianRecalibrationLock {
+  websiteId   String   @id
+  lockedAt    DateTime @default(now())
+  lockedBy    String
+  expiresAt   DateTime
+
+  website     Website  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("bayesian_recalibration_locks")
+}
+
 

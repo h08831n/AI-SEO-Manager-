@@ -210,11 +210,62 @@ function createInMemoryTable(tableName: string) {
       }
       return count;
     },
+    _getStore: () => store,
+    _setStore: (newStore: Map<string, any>) => {
+      store.clear();
+      for (const [k, v] of newStore.entries()) {
+        store.set(k, JSON.parse(JSON.stringify(v)));
+      }
+    },
   };
 }
 
+let inMemoryTxMutex = Promise.resolve();
+
 const fallbackClient: any = {
-  $transaction: async (arg: any) => (Array.isArray(arg) ? Promise.all(arg) : typeof arg === 'function' ? arg(fallbackClient) : arg),
+  $transaction: async (arg: any) => {
+    if (Array.isArray(arg)) {
+      return Promise.all(arg);
+    }
+    if (typeof arg === 'function') {
+      const prevMutex = inMemoryTxMutex;
+      let releaseMutex: () => void = () => {};
+      inMemoryTxMutex = new Promise<void>((resolve) => {
+        releaseMutex = resolve;
+      });
+
+      await prevMutex;
+
+      // Snapshot in-memory tables before running transaction
+      const snapshots = new Map<string, Map<string, any>>();
+      for (const [key, table] of Object.entries(fallbackClient)) {
+        if (table && typeof (table as any)._getStore === 'function') {
+          const original = (table as any)._getStore();
+          const clone = new Map<string, any>();
+          for (const [k, v] of original.entries()) {
+            clone.set(k, JSON.parse(JSON.stringify(v)));
+          }
+          snapshots.set(key, clone);
+        }
+      }
+
+      try {
+        return await arg(fallbackClient);
+      } catch (err) {
+        // Rollback all in-memory tables to pre-transaction snapshot
+        for (const [key, savedStore] of snapshots.entries()) {
+          const table = fallbackClient[key];
+          if (table && typeof (table as any)._setStore === 'function') {
+            table._setStore(savedStore);
+          }
+        }
+        throw err;
+      } finally {
+        releaseMutex();
+      }
+    }
+    return arg;
+  },
   $disconnect: async () => {},
   $connect: async () => {},
   website: createInMemoryTable('website'),
@@ -258,6 +309,9 @@ const fallbackClient: any = {
   actionAttributionFact: createInMemoryTable('actionAttributionFact'),
   syntheticControlMatch: createInMemoryTable('syntheticControlMatch'),
   bayesianRuleWeightState: createInMemoryTable('bayesianRuleWeightState'),
+  bayesianProcessedEvidence: createInMemoryTable('bayesianProcessedEvidence'),
+  bayesianRuleEvidenceCursor: createInMemoryTable('bayesianRuleEvidenceCursor'),
+  bayesianRecalibrationLock: createInMemoryTable('bayesianRecalibrationLock'),
 };
 
 const realPrisma = getPrismaClient();

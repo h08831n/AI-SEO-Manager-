@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { prisma } from '../server/db/prisma';
 import { BayesianRuleLearningEngine } from '../server/services/bayesian/bayesianRuleLearningEngine';
 import { PolicySafetyGate } from '../server/services/bayesian/policySafetyGate';
+import { RecalibrationLockManager } from '../server/services/bayesian/recalibrationLockManager';
 import { BayesianRecalibrationWorker } from '../server/services/worker/bayesianRecalibrationWorker';
 import { OpportunityScoreEngine } from '../server/services/decision/opportunityScoreEngine';
 import { DiagnosisEngine } from '../server/services/decision/diagnosisEngine';
@@ -490,6 +491,47 @@ describe('Phase 6.2: Bayesian Rule Learning & Policy Safety Gate', () => {
       expect(defaultScore).toBeGreaterThan(0);
       expect(dampedScore).toBeGreaterThan(0);
       expect(dampedScore).toBeLessThan(defaultScore);
+    });
+  });
+
+  describe('7. Concurrency, Lease Locking & Idempotent Recalibration Safety', () => {
+    it('RecalibrationLockManager acquires, respects lease contention, and releases safely', async () => {
+      const lock1 = await RecalibrationLockManager.acquireLock(testSiteId, 'worker-A', 5000);
+      expect(lock1.acquired).toBe(true);
+      expect(lock1.lockedBy).toBe('worker-A');
+
+      // Attempt concurrent acquire by worker-B -> rejected
+      const lock2 = await RecalibrationLockManager.acquireLock(testSiteId, 'worker-B', 5000);
+      expect(lock2.acquired).toBe(false);
+      expect(lock2.reason).toContain('worker-A');
+
+      // Release by worker-A
+      const released = await RecalibrationLockManager.releaseLock(testSiteId, 'worker-A');
+      expect(released).toBe(true);
+
+      // Now worker-B can acquire
+      const lock3 = await RecalibrationLockManager.acquireLock(testSiteId, 'worker-B', 5000);
+      expect(lock3.acquired).toBe(true);
+      await RecalibrationLockManager.releaseLock(testSiteId, 'worker-B');
+    });
+
+    it('recalibration does NOT double-count previously processed attribution evidence', async () => {
+      // 1st run: processes eligible facts
+      const run1 = await BayesianRuleLearningEngine.recalibrateRuleWeights(testSiteId);
+      expect(run1.totalFactsProcessed).toBeGreaterThanOrEqual(0);
+
+      // 2nd run immediately without new facts: must process 0 new evidence facts
+      const run2 = await BayesianRuleLearningEngine.recalibrateRuleWeights(testSiteId);
+      expect(run2.totalFactsProcessed).toBe(0);
+      expect(run2.totalRuleStatesUpdated).toBe(0);
+    });
+
+    it('emits transactional outbox events when rule weights are modified or damped', async () => {
+      const events = await prisma.outboxEvent.findMany({
+        where: { aggregateType: 'BAYESIAN_RULE_WEIGHT' },
+      });
+      expect(events.length).toBeGreaterThan(0);
+      expect(events.some((e: any) => e.eventType.startsWith('BAYESIAN_RULE_'))).toBe(true);
     });
   });
 });

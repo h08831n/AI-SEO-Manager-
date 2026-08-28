@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "tsx server.ts",
     "dev:api": "tsx server.ts",
     "dev:worker": "tsx server/worker.ts",

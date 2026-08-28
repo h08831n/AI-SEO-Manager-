@@ -24,6 +24,7 @@ export interface RecordOutboxEventParams {
   aggregateId?: string;
   eventType: string;
   payload: any;
+  tx?: any;
 }
 
 export interface CreateOutboxEventParams {
@@ -72,9 +73,11 @@ export class OutboxDispatcher {
       createdAt: now,
     };
 
-    if (prisma) {
+    const db = params.tx || prisma;
+
+    if (db) {
       try {
-        const created = await prisma.outboxEvent.create({
+        const created = await db.outboxEvent.create({
           data: {
             id,
             aggregateType,
@@ -99,7 +102,7 @@ export class OutboxDispatcher {
           createdAt: created.createdAt,
         };
       } catch (err) {
-        if (isProductionMode()) {
+        if (isProductionMode() || params.tx) {
           throw new Error(`PERSISTENCE_UNAVAILABLE: Outbox creation failed: ${err}`);
         }
       }

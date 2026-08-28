@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS "synthetic_control_matches" (
 );
 
 -- CreateTable "bayesian_rule_weight_states"
-CREATE TABLE IF NOT EXISTS "bayesian_rule_weight_state" (
+CREATE TABLE IF NOT EXISTS "bayesian_rule_weight_states" (
     "id" TEXT NOT NULL,
     "websiteId" TEXT NOT NULL,
     "ruleKey" TEXT NOT NULL,
@@ -80,6 +80,45 @@ CREATE TABLE IF NOT EXISTS "bayesian_rule_weight_state" (
     CONSTRAINT "bayesian_rule_weight_states_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable "bayesian_processed_evidence"
+CREATE TABLE IF NOT EXISTS "bayesian_processed_evidence" (
+    "id" TEXT NOT NULL,
+    "websiteId" TEXT NOT NULL,
+    "stateId" TEXT NOT NULL,
+    "attributionFactId" TEXT NOT NULL,
+    "outcomeCategory" TEXT NOT NULL,
+    "confidenceScore" DOUBLE PRECISION NOT NULL,
+    "processedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "bayesian_processed_evidence_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable "bayesian_rule_evidence_cursors"
+CREATE TABLE IF NOT EXISTS "bayesian_rule_evidence_cursors" (
+    "id" TEXT NOT NULL,
+    "websiteId" TEXT NOT NULL,
+    "ruleKey" TEXT NOT NULL,
+    "cmsProvider" TEXT NOT NULL DEFAULT 'ALL',
+    "pageArchetype" TEXT NOT NULL DEFAULT 'ALL',
+    "lastProcessedFactId" TEXT,
+    "lastProcessedFactDate" TIMESTAMP(3),
+    "processedFactCount" INTEGER NOT NULL DEFAULT 0,
+    "lastRecalibratedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "bayesian_rule_evidence_cursors_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable "bayesian_recalibration_locks"
+CREATE TABLE IF NOT EXISTS "bayesian_recalibration_locks" (
+    "websiteId" TEXT NOT NULL,
+    "lockedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lockedBy" TEXT NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "bayesian_recalibration_locks_pkey" PRIMARY KEY ("websiteId")
+);
+
 -- CreateIndexes
 CREATE INDEX IF NOT EXISTS "action_attribution_facts_actionExecutionId_idx" ON "action_attribution_facts"("actionExecutionId");
 CREATE UNIQUE INDEX IF NOT EXISTS "action_attribution_facts_evaluationKey_key" ON "action_attribution_facts"("evaluationKey");
@@ -96,6 +135,15 @@ CREATE INDEX IF NOT EXISTS "synthetic_control_matches_attributionFactId_idx" ON 
 
 CREATE UNIQUE INDEX IF NOT EXISTS "bayesian_rule_weight_states_websiteId_ruleKey_cmsProvider_pageArchetype_key" ON "bayesian_rule_weight_states"("websiteId", "ruleKey", "cmsProvider", "pageArchetype");
 CREATE INDEX IF NOT EXISTS "bayesian_rule_weight_states_websiteId_approvedAppliedWeight_idx" ON "bayesian_rule_weight_states"("websiteId", "approvedAppliedWeight");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "bayesian_processed_evidence_stateId_attributionFactId_key" ON "bayesian_processed_evidence"("stateId", "attributionFactId");
+CREATE INDEX IF NOT EXISTS "bayesian_processed_evidence_websiteId_processedAt_idx" ON "bayesian_processed_evidence"("websiteId", "processedAt");
+CREATE INDEX IF NOT EXISTS "bayesian_processed_evidence_attributionFactId_idx" ON "bayesian_processed_evidence"("attributionFactId");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "bayesian_rule_evidence_cursors_websiteId_ruleKey_cmsProvider_pageArchetype_key" ON "bayesian_rule_evidence_cursors"("websiteId", "ruleKey", "cmsProvider", "pageArchetype");
+CREATE INDEX IF NOT EXISTS "bayesian_rule_evidence_cursors_websiteId_lastProcessedFactDate_idx" ON "bayesian_rule_evidence_cursors"("websiteId", "lastProcessedFactDate");
+
+CREATE INDEX IF NOT EXISTS "bayesian_recalibration_locks_expiresAt_idx" ON "bayesian_recalibration_locks"("expiresAt");
 
 -- AddForeignKeys
 DO $$ BEGIN
@@ -136,4 +184,24 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   ALTER TABLE "bayesian_rule_weight_states" ADD CONSTRAINT "bayesian_rule_weight_states_websiteId_fkey" FOREIGN KEY ("websiteId") REFERENCES "websites"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "bayesian_processed_evidence" ADD CONSTRAINT "bayesian_processed_evidence_websiteId_fkey" FOREIGN KEY ("websiteId") REFERENCES "websites"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "bayesian_processed_evidence" ADD CONSTRAINT "bayesian_processed_evidence_stateId_fkey" FOREIGN KEY ("stateId") REFERENCES "bayesian_rule_weight_states"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "bayesian_processed_evidence" ADD CONSTRAINT "bayesian_processed_evidence_attributionFactId_fkey" FOREIGN KEY ("attributionFactId") REFERENCES "action_attribution_facts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "bayesian_rule_evidence_cursors" ADD CONSTRAINT "bayesian_rule_evidence_cursors_websiteId_fkey" FOREIGN KEY ("websiteId") REFERENCES "websites"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "bayesian_recalibration_locks" ADD CONSTRAINT "bayesian_recalibration_locks_websiteId_fkey" FOREIGN KEY ("websiteId") REFERENCES "websites"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
