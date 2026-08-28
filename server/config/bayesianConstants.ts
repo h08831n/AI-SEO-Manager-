@@ -11,11 +11,11 @@ export const DEFAULT_BETA_PRIOR = 2.0;
 // Canonical Policy Safety Bounds
 export const MIN_RULE_WEIGHT = 0.20;
 export const MAX_RULE_WEIGHT = 2.50;
-export const MAX_POLICY_CHANGE_PER_CYCLE = 0.35; // Maximum step change per recalibration cycle (Phase B requirement)
-export const MAX_WEIGHT_DELTA_PER_CYCLE = 0.35; // Alias for backward compatibility
+export const MAX_POLICY_CHANGE_PER_CYCLE = 0.15; // Maximum policy shift per Bayesian recalibration cycle (P0 Requirement)
+export const MAX_WEIGHT_DELTA_PER_CYCLE = 0.35; // Maximum step delta per isolated weight shift
 
 // Minimum Evidence Threshold
-export const MINIMUM_EVIDENCE_THRESHOLD = 10; // Minimum total alpha + beta evidence before auto-updating policy (alpha + beta >= 10)
+export const MINIMUM_EVIDENCE_THRESHOLD = 10; // Minimum total evidence before automated policy shift (alpha + beta >= 10)
 
 // Drift & Review Triggers
 export const DRIFT_REVIEW_THRESHOLD = 0.50; // If raw weight shifts from current by >= 0.50, flag for review

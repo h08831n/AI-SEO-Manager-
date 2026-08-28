@@ -7,6 +7,10 @@ export const ATTRIBUTION_MODEL_VERSION = 'causal-did-v1';
 // Minimum observation horizon (days) required for valid attribution inference
 export const MIN_ATTRIBUTION_HORIZON_DAYS = 14;
 
+// Synthetic Control Selection Thresholds
+export const MIN_CONTROL_SIMILARITY = 0.50; // Controls below 0.50 similarity score are rejected
+export const MIN_CONTROL_HISTORY_DAYS = 14; // Minimum history days required for candidate control
+
 // Confidence score thresholds
 export const ATTRIBUTION_MIN_CONFIDENCE_THRESHOLD = 0.50; // Gate for assigning WIN / LOSS and Bayesian ingestion
 export const ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD = 0.45; // Below this is strictly INCONCLUSIVE

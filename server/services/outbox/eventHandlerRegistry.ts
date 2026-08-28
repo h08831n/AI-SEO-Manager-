@@ -36,8 +36,9 @@ export class EventHandlerRegistry {
       if (websiteId) {
         try {
           await BayesianRuleLearningEngine.recalibrateRuleWeights(websiteId);
-        } catch (err) {
+        } catch (err: any) {
           console.error(`[EventHandlerRegistry] Bayesian recalibration triggered by attribution failed for ${websiteId}:`, err);
+          throw err;
         }
       }
     });
@@ -47,8 +48,9 @@ export class EventHandlerRegistry {
       try {
         const { AttributionEvaluationWorker } = await import('../worker/attributionEvaluationWorker');
         await AttributionEvaluationWorker.handleEvent('ATTRIBUTION_EVALUATION_REQUESTED', payload);
-      } catch (err) {
+      } catch (err: any) {
         console.error('[EventHandlerRegistry] ATTRIBUTION_EVALUATION_REQUESTED handler failed:', err);
+        throw err;
       }
     });
 

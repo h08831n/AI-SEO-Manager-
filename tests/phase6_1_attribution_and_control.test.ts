@@ -205,6 +205,16 @@ describe('Phase 6.1: Causal Attribution Engine & Synthetic Control Matching', ()
           position: 13.0,
         },
       });
+      await prisma.gscSearchAnalyticsFact.create({
+        data: {
+          websiteId: testWebsiteId,
+          urlIdentityId: cand2.id,
+          date: preDate,
+          clicks: 80,
+          impressions: 1600,
+          position: 15.0,
+        },
+      });
 
       const matches = await SyntheticControlEngine.selectSyntheticControls({
         websiteId: testWebsiteId,

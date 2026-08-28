@@ -2,23 +2,51 @@ import { startBackgroundWorker } from './services/worker/backgroundWorker';
 import { ActionWatchdogWorker } from './services/worker/actionWatchdogWorker';
 import { CrawlerQueueConsumer } from './queues/crawlerQueueConsumer';
 import { SyncQueueConsumer } from './queues/syncQueueConsumer';
+import { SerpQueueConsumer } from './queues/serpQueueConsumer';
+import { ActionQueueConsumer } from './queues/actionQueueConsumer';
+import { AttributionQueueConsumer } from './queues/attributionQueueConsumer';
 import { OutboxDispatcher } from './services/outbox/outboxDispatcher';
 import { recordWorkerHeartbeat } from './routes/observabilityRoutes';
+import { isProductionMode } from './config/runtimeMode';
 
-console.log('[Worker Process] Initializing Autonomous SEO Worker Runtime, Consumer & Outbox Dispatcher...');
+console.log('[Worker Process] Initializing Autonomous SEO Worker Runtime, Consumers & Outbox Dispatcher...');
 
-// 1. Initialize BullMQ Crawler Consumer Worker & Integration Sync Consumer
+if (isProductionMode() && !process.env.REDIS_URL) {
+  console.error('[Worker Process] FATAL: REDIS_URL is required in PRODUCTION mode for worker consumers.');
+  process.exit(1);
+}
+
+// 1. Initialize BullMQ Consumers
 CrawlerQueueConsumer.initialize();
 SyncQueueConsumer.start();
+const serpQueueConsumer = new SerpQueueConsumer();
+serpQueueConsumer.start();
+ActionQueueConsumer.start();
+AttributionQueueConsumer.start();
 
 // 2. Start Transactional Outbox Polling
 OutboxDispatcher.startPolling(2000);
 
-// 3. Start Background Task Worker & Action Stuck Execution Watchdog Worker (5 min interval)
+// 3. Start Background Task Worker & Action Stuck Execution Watchdog Worker
 const workerRuntime = startBackgroundWorker();
 const watchdogWorkerRuntime = ActionWatchdogWorker.start();
 
-// 4. Periodic Worker Heartbeat emitter (local + shared)
+// 4. Print Structured Topology Banner
+console.log(`
+========================================
+AUTONOMOUS SEO WORKER RUNTIME TOPOLOGY
+========================================
+CrawlerConsumer ........ ENABLED
+SyncConsumer ........... ENABLED
+SerpConsumer ........... ENABLED
+ActionConsumer ......... ENABLED
+AttributionConsumer .... ENABLED
+OutboxDispatcher ....... ENABLED
+Watchdog ............... ENABLED
+========================================
+`);
+
+// 5. Periodic Worker Heartbeat emitter (local + shared)
 const heartbeatTimer = setInterval(() => {
   recordWorkerHeartbeat();
 }, 10000);
@@ -30,6 +58,9 @@ const shutdown = async (signal: string) => {
   OutboxDispatcher.stopPolling();
   try {
     await watchdogWorkerRuntime.stop();
+    await serpQueueConsumer.stop();
+    await ActionQueueConsumer.stop();
+    await AttributionQueueConsumer.stop();
     await CrawlerQueueConsumer.shutdown();
     await SyncQueueConsumer.stop();
     await workerRuntime.stop();

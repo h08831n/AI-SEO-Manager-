@@ -13,6 +13,7 @@
 
 import { prisma } from '../../db/prisma';
 import { BayesianApprovalStatus } from '../../config/bayesianConstants';
+import { isProductionMode } from '../../config/runtimeMode';
 
 export interface ResolvedRuleWeight {
   ruleKey: string;
@@ -129,8 +130,11 @@ export class RuleWeightResolver {
           };
         }
       }
-    } catch {
-      // If database is temporarily unavailable, fall back to default
+    } catch (err: any) {
+      if (isProductionMode()) {
+        throw new Error(`POLICY_STATE_UNAVAILABLE: Failed to resolve Bayesian rule weight from database in production: ${err.message}`);
+      }
+      // If database is temporarily unavailable in non-production, fall back to default
     }
 
     // 4. Default baseline
@@ -204,13 +208,25 @@ export class RuleWeightResolver {
         // Default
         weightsMap[ruleKey] = 1.0;
       }
-    } catch {
+    } catch (err: any) {
+      if (isProductionMode()) {
+        throw new Error(`POLICY_STATE_UNAVAILABLE: Failed to resolve batch Bayesian rule weights from database in production: ${err.message}`);
+      }
       for (const ruleKey of ruleKeys) {
         weightsMap[ruleKey] = 1.0;
       }
     }
 
     return weightsMap;
+  }
+
+  public static async resolveEffectiveWeight(params: {
+    websiteId: string;
+    ruleKey: string;
+    cmsProvider?: string;
+    pageArchetype?: string;
+  }): Promise<ResolvedRuleWeight> {
+    return this.resolveWeight(params);
   }
 
   /**

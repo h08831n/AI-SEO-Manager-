@@ -376,6 +376,7 @@ describe('Phase 5 Final Hardening Acceptance Tests', () => {
         targetUrl: context.url,
         payload: diagnosis!.actionPayload,
         idempotencyKey: `idemp-cr-${Date.now()}`,
+        userId: 'usr-admin-test',
         autoVerify: true,
       });
 

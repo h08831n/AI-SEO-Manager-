@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { ActionOrchestrationService } from '../services/action/actionOrchestrationService';
+import { ActionExecutionPipeline } from '../services/action/actionExecutionPipeline';
 import { VerificationEngine } from '../services/action/verificationEngine';
 import { ActionApprovalCenter } from '../services/action/approval/actionApprovalCenter';
 import { ActionSnapshotService } from '../services/action/snapshots/actionSnapshotService';
@@ -20,6 +20,7 @@ const ExecuteActionSchema = z.object({
   isDryRun: z.boolean().optional(),
   autoVerify: z.boolean().optional(),
   platform: z.string().optional(),
+  executionMode: z.enum(['MANUAL', 'AUTONOMOUS', 'CANARY']).optional(),
 });
 
 // POST /api/actions/execute
@@ -34,10 +35,20 @@ router.post('/execute', async (req: Request, res: Response) => {
       return res.status(400).json({ error: parseResult.error.flatten() });
     }
 
-    const { actionType, targetUrl, payload, idempotencyKey, taskId, recommendationId, isDryRun, autoVerify, platform } =
-      parseResult.data;
+    const {
+      actionType,
+      targetUrl,
+      payload,
+      idempotencyKey,
+      taskId,
+      recommendationId,
+      isDryRun,
+      autoVerify,
+      platform,
+      executionMode = 'MANUAL',
+    } = parseResult.data;
 
-    const result = await ActionOrchestrationService.executeAction({
+    const result = await ActionExecutionPipeline.execute({
       websiteId,
       taskId,
       recommendationId,
@@ -45,6 +56,7 @@ router.post('/execute', async (req: Request, res: Response) => {
       targetUrl,
       payload,
       idempotencyKey,
+      executionMode,
       userId,
       userRole,
       isDryRun,
@@ -66,7 +78,7 @@ router.post('/:id/rollback', async (req: Request, res: Response) => {
     const reason = req.body.reason || 'Manual 1-click rollback requested';
     const platform = req.body.platform;
 
-    const result = await ActionOrchestrationService.rollbackAction({
+    const result = await ActionExecutionPipeline.rollback({
       actionExecutionId: req.params.id,
       websiteId,
       reason,

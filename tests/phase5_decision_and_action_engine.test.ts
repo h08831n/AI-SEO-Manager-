@@ -20,6 +20,7 @@ describe('Phase 5: Autonomous SEO Decision Engine & Action Execution', () => {
   const testWebsiteId = 'site-test-decision-01';
 
   beforeEach(async () => {
+    process.env.AUTONOMOUS_EXECUTION_ENABLED = 'true';
     // Ensure test website exists
     await prisma.website.upsert({
       where: { id: testWebsiteId },

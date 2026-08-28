@@ -1,5 +1,9 @@
 import { prisma } from '../../db/prisma';
 import { AttributionLineageService } from './attributionLineageService';
+import {
+  MIN_CONTROL_SIMILARITY,
+  MIN_CONTROL_HISTORY_DAYS,
+} from '../../config/attributionConstants';
 
 export interface SyntheticControlFeatureBreakdown {
   archetypeSimilarity: number;
@@ -203,14 +207,16 @@ export class SyntheticControlEngine {
         candidateInlinks,
       };
 
-      scoredCandidates.push({
-        controlUrlId: candidate.id,
-        controlUrl: candidate.normalizedUrl,
-        similarityScore: Number(compositeSimilarity.toFixed(4)),
-        features,
-        baselinePreClicks: candidatePreClicks,
-        baselinePostClicks: 0,
-      });
+      if (compositeSimilarity >= MIN_CONTROL_SIMILARITY) {
+        scoredCandidates.push({
+          controlUrlId: candidate.id,
+          controlUrl: candidate.normalizedUrl,
+          similarityScore: Number(compositeSimilarity.toFixed(4)),
+          features,
+          baselinePreClicks: candidatePreClicks,
+          baselinePostClicks: 0,
+        });
+      }
     }
 
     // Sort descending by similarity score and take top k
@@ -255,5 +261,67 @@ export class SyntheticControlEngine {
       });
     }
   }
+
+  /**
+   * Evaluates synthetic control suitability over a history series.
+   */
+  public static selectSyntheticControl(params: {
+    treatmentUrl: string;
+    treatmentPreHistory: Array<{ date: string; clicks: number; impressions: number }>;
+    candidatePool: Array<{ url: string; metrics: Array<{ date: string; clicks: number; impressions: number }> }>;
+  }): {
+    isValidControl: boolean;
+    similarityScore: number;
+    selectedControlUrl?: string;
+  } {
+    const { treatmentUrl, treatmentPreHistory, candidatePool } = params;
+    if (!treatmentPreHistory || treatmentPreHistory.length < MIN_CONTROL_HISTORY_DAYS || candidatePool.length === 0) {
+      return { isValidControl: false, similarityScore: 0 };
+    }
+
+    let bestScore = -1;
+    let bestUrl: string | undefined;
+
+    const treatClicks = treatmentPreHistory.map(p => p.clicks);
+    const treatMean = treatClicks.reduce((a, b) => a + b, 0) / treatClicks.length;
+
+    for (const cand of candidatePool) {
+      if (cand.metrics.length < MIN_CONTROL_HISTORY_DAYS) continue;
+
+      const candClicks = cand.metrics.map(p => p.clicks);
+      const candMean = candClicks.reduce((a, b) => a + b, 0) / candClicks.length;
+
+      // Pearson correlation
+      let num = 0;
+      let denomTreat = 0;
+      let denomCand = 0;
+
+      for (let i = 0; i < Math.min(treatClicks.length, candClicks.length); i++) {
+        const dt = treatClicks[i] - treatMean;
+        const dc = candClicks[i] - candMean;
+        num += dt * dc;
+        denomTreat += dt * dt;
+        denomCand += dc * dc;
+      }
+
+      const denom = Math.sqrt(denomTreat * denomCand);
+      const correlation = denom > 0 ? num / denom : 0;
+
+      if (correlation > bestScore) {
+        bestScore = correlation;
+        bestUrl = cand.url;
+      }
+    }
+
+    const similarity = Math.max(0, Number(bestScore.toFixed(4)));
+    const isValidControl = similarity >= MIN_CONTROL_SIMILARITY;
+
+    return {
+      isValidControl,
+      similarityScore: similarity,
+      selectedControlUrl: isValidControl ? bestUrl : undefined,
+    };
+  }
 }
+
 

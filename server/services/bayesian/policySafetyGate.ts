@@ -53,13 +53,54 @@ export interface PolicyGateEvaluationResult {
 
 export class PolicySafetyGate {
   /**
+   * Dedicated P0 weight adjustment evaluation with strict evidence threshold & policy clamping.
+   */
+  public static evaluateWeightAdjustment(params: {
+    ruleKey: string;
+    currentWeight: number;
+    proposedWeight: number;
+    alphaPosterior: number;
+    betaPosterior: number;
+    minEvidenceThreshold?: number;
+  }): {
+    isApproved: boolean;
+    appliedWeight: number;
+    wasClamped: boolean;
+    rejectionReason?: string;
+  } {
+    const minThreshold = params.minEvidenceThreshold ?? MINIMUM_EVIDENCE_THRESHOLD;
+    const totalEvidence = params.alphaPosterior + params.betaPosterior;
+
+    if (totalEvidence < minThreshold) {
+      return {
+        isApproved: false,
+        appliedWeight: params.currentWeight,
+        wasClamped: false,
+        rejectionReason: `INSUFFICIENT_EVIDENCE: Total evidence ${totalEvidence} is below required threshold ${minThreshold}.`,
+      };
+    }
+
+    const rawDelta = params.proposedWeight - params.currentWeight;
+    let appliedDelta = rawDelta;
+    let wasClamped = false;
+
+    if (Math.abs(rawDelta) > MAX_POLICY_CHANGE_PER_CYCLE) {
+      appliedDelta = rawDelta > 0 ? MAX_POLICY_CHANGE_PER_CYCLE : -MAX_POLICY_CHANGE_PER_CYCLE;
+      wasClamped = true;
+    }
+
+    let appliedWeight = params.currentWeight + appliedDelta;
+    appliedWeight = Math.min(MAX_RULE_WEIGHT, Math.max(MIN_RULE_WEIGHT, appliedWeight));
+
+    return {
+      isApproved: true,
+      appliedWeight: Number(appliedWeight.toFixed(3)),
+      wasClamped,
+    };
+  }
+
+  /**
    * Evaluates a proposed Bayesian raw weight through the policy safety gate.
-   * Enforces:
-   * 1. Locked State Protection: A LOCKED rule must never be automatically modified.
-   * 2. Minimum Evidence Invariant: alpha + beta >= 10 (or configurable threshold).
-   * 3. Step-Delta Rate Limiting: |delta| <= MAX_POLICY_CHANGE_PER_CYCLE (0.15).
-   * 4. Auto-Damping: Caps rules with excessive losses or low win rates.
-   * 5. Boundary Clamping: Strictly encloses weights within [0.20, 2.50].
    */
   public static evaluateWeightUpdate(input: PolicyGateEvaluationInput): PolicyGateEvaluationResult {
     const {
@@ -81,8 +122,7 @@ export class PolicySafetyGate {
       ? (alphaPosterior + betaPosterior)
       : (DEFAULT_ALPHA_PRIOR + DEFAULT_BETA_PRIOR + totalObs);
 
-    const effectiveMinEvidence = minEvidenceThreshold !== undefined ? minEvidenceThreshold : 0; // Default 0 for raw unit tests, checked conditionally
-    const effectiveMaxDelta = maxStepDelta !== undefined ? maxStepDelta : MAX_POLICY_CHANGE_PER_CYCLE;
+    const effectiveMaxDelta = maxStepDelta !== undefined ? maxStepDelta : MAX_WEIGHT_DELTA_PER_CYCLE;
 
     // 1. Invariant 1: Locked State Protection
     if (currentApprovalStatus === 'LOCKED') {
@@ -99,7 +139,22 @@ export class PolicySafetyGate {
       };
     }
 
-    // 2. Invariant 2: Auto-Damping Assessment
+    // 2. Invariant 2: Minimum Evidence Check when explicitly enforced
+    if (minEvidenceThreshold !== undefined && totalEvidence < minEvidenceThreshold) {
+      return {
+        rawCalculatedWeight: Number(rawCalculatedWeight.toFixed(3)),
+        approvedAppliedWeight: Number(currentAppliedWeight.toFixed(3)),
+        approvalStatus: currentApprovalStatus === 'PENDING_REVIEW' ? 'PENDING_REVIEW' : 'ACTIVE',
+        isAutoDamped: false,
+        dampedReason: null,
+        driftDetected: false,
+        deltaApplied: 0,
+        insufficientEvidence: true,
+        auditExplanation: `Evidence (total α+β = ${totalEvidence.toFixed(1)}) is below minimum required threshold (${minEvidenceThreshold}). Weight held constant at ${currentAppliedWeight}.`,
+      };
+    }
+
+    // 3. Invariant 3: Auto-Damping Assessment
     const meetsLossDamp = observedLosses >= AUTO_DAMP_LOSS_THRESHOLD && posteriorWinRate < 0.40;
     const meetsWinRateDamp = totalObs >= MIN_OBSERVATIONS_FOR_AUTO_DAMP && posteriorWinRate < AUTO_DAMP_WIN_RATE_THRESHOLD;
     const shouldDamp = meetsLossDamp || meetsWinRateDamp;
@@ -124,26 +179,11 @@ export class PolicySafetyGate {
       };
     }
 
-    // 3. Invariant 3: Minimum Evidence Check (if required by calling context)
-    if (minEvidenceThreshold !== undefined && totalEvidence < minEvidenceThreshold) {
-      return {
-        rawCalculatedWeight: Number(rawCalculatedWeight.toFixed(3)),
-        approvedAppliedWeight: Number(currentAppliedWeight.toFixed(3)),
-        approvalStatus: currentApprovalStatus === 'PENDING_REVIEW' ? 'PENDING_REVIEW' : 'ACTIVE',
-        isAutoDamped: false,
-        dampedReason: null,
-        driftDetected: false,
-        deltaApplied: 0,
-        insufficientEvidence: true,
-        auditExplanation: `Evidence (total α+β = ${totalEvidence.toFixed(1)}) is below minimum required threshold (${minEvidenceThreshold}). Weight held constant at ${currentAppliedWeight}.`,
-      };
-    }
-
     // 4. Invariant 4: Drift & Divergence Check
     const driftDelta = Math.abs(rawCalculatedWeight - currentAppliedWeight);
     const driftDetected = driftDelta >= DRIFT_REVIEW_THRESHOLD;
 
-    // 5. Invariant 5: Rate-Limited Step Clamping (|delta| <= MAX_POLICY_CHANGE_PER_CYCLE)
+    // 5. Invariant 5: Rate-Limited Step Clamping
     const rawDelta = rawCalculatedWeight - currentAppliedWeight;
     let clampedDelta = rawDelta;
     if (Math.abs(rawDelta) > effectiveMaxDelta) {
@@ -179,4 +219,3 @@ export class PolicySafetyGate {
     };
   }
 }
-

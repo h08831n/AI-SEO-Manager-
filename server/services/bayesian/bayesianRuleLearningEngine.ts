@@ -19,6 +19,7 @@ import { RecalibrationLockManager } from './recalibrationLockManager';
 import {
   DEFAULT_ALPHA_PRIOR,
   DEFAULT_BETA_PRIOR,
+  MINIMUM_EVIDENCE_THRESHOLD,
   BayesianApprovalStatus,
 } from '../../config/bayesianConstants';
 
@@ -241,6 +242,8 @@ export class BayesianRuleLearningEngine {
           posteriorWinRate: posteriorMeanWinRate,
           observedWins: totalObservedWins,
           observedLosses: totalObservedLosses,
+          alphaPosterior,
+          betaPosterior,
           isCurrentlyDamped,
         });
 

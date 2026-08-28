@@ -21,6 +21,8 @@ import { VerificationEngine } from './verificationEngine';
 import { AuditLogRepository } from '../../repositories/auditLogRepository';
 import { ActionSnapshotService } from './snapshots/actionSnapshotService';
 import { OutboxDispatcher } from '../outbox/outboxDispatcher';
+import { ActionApprovalCenter } from './approval/actionApprovalCenter';
+import { LearningLoopEngine } from '../decision/learningLoopEngine';
 
 export type ActionExecutionMode = 'MANUAL' | 'AUTONOMOUS' | 'CANARY';
 export type ActionRiskTier = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -33,7 +35,7 @@ export interface ActionExecutionPipelineParams {
   targetUrl: string;
   payload: Record<string, any>;
   idempotencyKey: string;
-  executionMode: ActionExecutionMode;
+  executionMode?: ActionExecutionMode;
   userId?: string;
   userRole?: string;
   isDryRun?: boolean;
@@ -100,7 +102,7 @@ export class ActionExecutionPipeline {
       targetUrl,
       payload,
       idempotencyKey,
-      executionMode,
+      executionMode = params.userId ? 'MANUAL' : 'AUTONOMOUS',
       userId,
       userRole,
       isDryRun = false,
@@ -119,10 +121,11 @@ export class ActionExecutionPipeline {
     const riskTier = this.classifyRisk(actionType, payload);
 
     // 3. Global Autonomy Killswitch Verification
+    // CRITICAL: A userId must NEVER bypass the autonomy killswitch if executionMode is AUTONOMOUS
     const isAutonomous = executionMode === 'AUTONOMOUS' || executionMode === 'CANARY';
     const isAutonomyEnabled = process.env.AUTONOMOUS_EXECUTION_ENABLED === 'true';
 
-    if (isAutonomous && !isAutonomyEnabled && !userId) {
+    if (isAutonomous && !isAutonomyEnabled) {
       throw new Error('AUTONOMY_DISABLED: Global autonomy killswitch is active. Autonomous execution is disabled.');
     }
 
@@ -145,22 +148,35 @@ export class ActionExecutionPipeline {
     }
 
     // 5. Governance Evaluation
+    let mappedRiskLevel: AutomationRiskLevel;
+    switch (riskTier) {
+      case 'LOW':
+        mappedRiskLevel = AutomationRiskLevel.LEVEL_1_SAFE_AUTOMATION;
+        break;
+      case 'MEDIUM':
+        mappedRiskLevel = AutomationRiskLevel.LEVEL_2_REVIEW_REQUIRED;
+        break;
+      case 'HIGH':
+      case 'CRITICAL':
+      default:
+        mappedRiskLevel = AutomationRiskLevel.LEVEL_3_HIGH_RISK_MANUAL_ONLY;
+        break;
+    }
+
     const governance = await GovernanceEngine.evaluateExecutionGovernance({
       websiteId,
       actionType,
-      automationLevel:
-        riskTier === 'CRITICAL' || riskTier === 'HIGH'
-          ? AutomationRiskLevel.LEVEL_3_HIGH_RISK_MANUAL_ONLY
-          : AutomationRiskLevel.LEVEL_1_SAFE_AUTOMATION,
-      isManualTrigger: Boolean(userId),
+      automationLevel: mappedRiskLevel,
+      isManualTrigger: executionMode === 'MANUAL',
       userRole,
     });
 
-    if (!governance.allowed && !userId) {
+    if (!governance.allowed) {
       throw new Error(`GOVERNANCE_BLOCKED: ${governance.reason}`);
     }
 
     // High and Critical risk actions MUST have human approval if running autonomously
+    let boundApprovalId: string | undefined;
     if (isAutonomous && (riskTier === 'CRITICAL' || riskTier === 'HIGH')) {
       const priorApproval = await prisma.actionApprovalRequest.findFirst({
         where: {
@@ -169,6 +185,7 @@ export class ActionExecutionPipeline {
           actionType,
           state: 'APPROVED',
         },
+        orderBy: { createdAt: 'desc' },
       });
 
       if (!priorApproval) {
@@ -176,6 +193,8 @@ export class ActionExecutionPipeline {
           `APPROVAL_REQUIRED: Action of risk tier ${riskTier} requires explicit human approval before execution.`
         );
       }
+
+      boundApprovalId = priorApproval.id;
     }
 
     // 6. Target & Executor Resolution
@@ -201,69 +220,94 @@ export class ActionExecutionPipeline {
         state: ActionStatus.DRY_RUN_VALIDATED,
         executionMode,
         riskTier,
-        message: 'Dry run completed successfully. Target payload is valid.',
+        message: 'Dry run completed successfully. Payload is valid and ready for execution.',
         correlationId,
       };
     }
 
     // 8. Capture Pre-State Snapshot
-    const preStateSnapshot = await executor.capturePreState(target);
+    const preStateSnapshot = typeof (executor as any).capturePreState === 'function'
+      ? await (executor as any).capturePreState(target)
+      : (typeof (executor as any).getCurrentState === 'function'
+        ? await (executor as any).getCurrentState(target)
+        : {});
+    const executionId = `exec-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-    // 9. Record ActionExecution with EXECUTING status
+    // Bind approval request if present
+    if (boundApprovalId) {
+      await ActionApprovalCenter.markExecuting(boundApprovalId, executionId, userId || 'SYSTEM');
+    }
+
+    // Persist durable snapshot (survives worker restarts)
+    await ActionSnapshotService.savePreStateSnapshot({
+      actionExecutionId: executionId,
+      websiteId,
+      targetUrl,
+      actionType,
+      preState: preStateSnapshot,
+    });
+
+    // 9. Create ActionExecution Record in EXECUTING state
     const actionExecution = await prisma.actionExecution.create({
       data: {
+        id: executionId,
         websiteId,
         taskId,
         recommendationId,
         actionType,
         targetUrl,
         idempotencyKey,
-        requestedByUserId: userId,
         state: ActionStatus.EXECUTING,
-        attemptCount: 1,
+        appliedPayloadJson: JSON.stringify(payload),
         beforeEvidenceJson: JSON.stringify(preStateSnapshot),
-        executedAt: new Date(),
+        triggeredByUserId: userId,
       },
     });
 
-    // 10. Persist Snapshot for Restart Survival
-    await ActionSnapshotService.savePreStateSnapshot({
-      actionExecutionId: actionExecution.id,
-      websiteId,
-      actionType,
-      targetUrl,
-      preState: preStateSnapshot,
-    });
+    // 10. Execute Mutation through Authoritative Executor
+    let execResult: any;
+    try {
+      execResult = await executor.apply(target, payload);
+    } catch (execError: any) {
+      await prisma.actionExecution.update({
+        where: { id: actionExecution.id },
+        data: {
+          state: ActionStatus.FAILED,
+          failureReason: execError.message,
+        },
+      });
 
-    // 11. Apply Mutation through Executor
-    const execResult = await executor.apply(target, payload, preStateSnapshot);
+      await AuditLogRepository.log({
+        websiteId,
+        actionName: `EXECUTION_FAILED_${actionType}`,
+        affectedUrl: targetUrl,
+        triggeredBy: userId ? `USER_${userId}` : `AUTONOMOUS_${executionMode}`,
+        reason: `Execution failed: ${execError.message}`,
+        beforeStateJson: JSON.stringify(preStateSnapshot),
+        isReversible: true,
+        isReverted: false,
+        correlationId,
+      });
 
-    // 12. Update ActionExecution to AWAITING_VERIFICATION
+      throw new Error(`MUTATION_FAILED: ${execError.message}`);
+    }
+
+    // Update with after evidence
     await prisma.actionExecution.update({
       where: { id: actionExecution.id },
       data: {
-        state: ActionStatus.AWAITING_VERIFICATION,
+        state: autoVerify ? ActionStatus.AWAITING_VERIFICATION : ActionStatus.APPLIED,
         afterEvidenceJson: JSON.stringify(execResult.appliedState),
       },
     });
 
-    if (taskId) {
-      await prisma.seoTask.update({
-        where: { id: taskId },
-        data: {
-          status: ActionStatus.AWAITING_VERIFICATION,
-          executedAt: new Date(),
-        },
-      });
-    }
-
-    // 13. Audit Log & Outbox Event
+    // Immutable Audit Log
     await AuditLogRepository.log({
       websiteId,
       actionName: `EXECUTE_${actionType}`,
       affectedUrl: targetUrl,
       triggeredBy: userId ? `USER_${userId}` : `AUTONOMOUS_${executionMode}`,
-      reason: execResult.message || 'Action executed via ActionExecutionPipeline',
+      reason: execResult.diffSummary || 'Action executed via ActionExecutionPipeline',
       beforeStateJson: JSON.stringify(preStateSnapshot),
       afterStateJson: JSON.stringify(execResult.appliedState),
       isReversible: true,
@@ -271,6 +315,7 @@ export class ActionExecutionPipeline {
       correlationId,
     });
 
+    // Outbox Event for Event-Driven Architecture
     await OutboxDispatcher.recordEvent({
       aggregateType: 'ACTION_EXECUTION',
       aggregateId: actionExecution.id,
@@ -278,8 +323,6 @@ export class ActionExecutionPipeline {
       payload: {
         actionExecutionId: actionExecution.id,
         websiteId,
-        taskId,
-        recommendationId,
         actionType,
         targetUrl,
         executionMode,
@@ -289,14 +332,14 @@ export class ActionExecutionPipeline {
       },
     });
 
-    // 14. Independent Verification & Closed-Loop Rollback
-    let verificationResult: any = null;
+    // 11. Independent Verification (Stage 1 Synthetic & DOM check)
     let rolledBack = false;
+    let verificationResult: any = null;
 
     if (autoVerify) {
       let ruleKey: string | undefined;
       if (recommendationId) {
-        const rec = await prisma.seoRecommendation.findUnique({ where: { id: recommendationId } });
+        const rec = await prisma.decisionRecommendation.findUnique({ where: { id: recommendationId } });
         ruleKey = rec?.ruleKey || undefined;
       }
 
@@ -313,7 +356,7 @@ export class ActionExecutionPipeline {
       // If synthetic verification indicates failure -> AUTOMATIC DETERMINISTIC ROLLBACK
       if (verificationResult.requiresRollback) {
         const rollbackExecutor = ActionExecutorRouter.getExecutor(actionType);
-        const rollbackRes = await rollbackExecutor.rollback(target, preStateSnapshot);
+        await rollbackExecutor.rollback(target, preStateSnapshot);
 
         await prisma.actionExecution.update({
           where: { id: actionExecution.id },
@@ -328,6 +371,10 @@ export class ActionExecutionPipeline {
             where: { id: taskId },
             data: { status: ActionStatus.REVERTED_RESTORED },
           });
+        }
+
+        if (boundApprovalId) {
+          await ActionApprovalCenter.markRolledBack(boundApprovalId, verificationResult.varianceDetails, 'VERIFICATION_AUTO_ROLLBACK');
         }
 
         await AuditLogRepository.log({
@@ -369,6 +416,10 @@ export class ActionExecutionPipeline {
             data: { status: ActionStatus.VERIFIED_COMPLETED },
           });
         }
+
+        if (boundApprovalId) {
+          await ActionApprovalCenter.markVerified(boundApprovalId, userId || 'VERIFIER');
+        }
       }
     }
 
@@ -387,5 +438,123 @@ export class ActionExecutionPipeline {
       correlationId,
     };
   }
-}
 
+  /**
+   * Executes a 1-click deterministic rollback by restoring the pre-state snapshot.
+   * Survives worker restarts by reloading snapshot from durable database storage.
+   */
+  public static async rollback(params: {
+    actionExecutionId: string;
+    websiteId: string;
+    reason?: string;
+    userId?: string;
+    platform?: string;
+  }): Promise<{ success: boolean; message: string; restoredState: any }> {
+    const startTime = Date.now();
+    const { actionExecutionId, websiteId, reason, userId, platform } = params;
+
+    const execution = await prisma.actionExecution.findFirst({
+      where: { id: actionExecutionId, websiteId },
+      include: { recommendation: true, task: true },
+    });
+
+    if (!execution) {
+      throw new Error(`Action execution '${actionExecutionId}' not found for website '${websiteId}'`);
+    }
+
+    // Retrieve snapshot from persistent SnapshotService (handles worker restart recovery)
+    const snapshotEntity = await ActionSnapshotService.getPreStateSnapshot(actionExecutionId);
+    let preStateSnapshot = snapshotEntity?.preStateJson ? JSON.parse(snapshotEntity.preStateJson) : null;
+
+    if (!preStateSnapshot && execution.beforeEvidenceJson) {
+      preStateSnapshot = JSON.parse(execution.beforeEvidenceJson);
+    }
+
+    if (!preStateSnapshot) {
+      throw new Error(`Cannot rollback action '${actionExecutionId}': Missing preStateSnapshot.`);
+    }
+
+    const website = await prisma.website.findUnique({ where: { id: websiteId } });
+    const target = {
+      websiteId,
+      targetUrl: execution.targetUrl,
+      domain: website?.domain || 'example.com',
+      platform,
+    };
+
+    const executor = ActionExecutorRouter.getExecutor(execution.actionType);
+    const rollbackResult = await executor.rollback(target, preStateSnapshot);
+
+    // Update ActionExecution state to REVERTED_RESTORED
+    await prisma.actionExecution.update({
+      where: { id: actionExecutionId },
+      data: {
+        state: ActionStatus.REVERTED_RESTORED,
+        failureReason: reason || 'Rollback triggered',
+        updatedAt: new Date(),
+      },
+    });
+
+    if (execution.taskId) {
+      await prisma.seoTask.update({
+        where: { id: execution.taskId },
+        data: { status: ActionStatus.REVERTED_RESTORED },
+      });
+    }
+
+    // Persist to RollbackExecutionHistory
+    await ActionSnapshotService.recordRollbackHistory({
+      actionExecutionId,
+      websiteId,
+      rolledBackByUserId: userId,
+      reason: reason || 'Rollback triggered',
+      preStateRestored: rollbackResult.restoredState,
+      success: rollbackResult.success,
+      durationMs: Date.now() - startTime,
+    });
+
+    // Learning Loop: Record Rollback outcome
+    const ruleKey = execution.recommendation?.ruleKey;
+    if (ruleKey) {
+      await LearningLoopEngine.recordActionOutcome({
+        ruleKey,
+        websiteId,
+        actionExecutionId,
+        actionType: execution.actionType,
+        outcome: 'ROLLED_BACK',
+      });
+    }
+
+    // Audit Logging
+    await AuditLogRepository.log({
+      websiteId,
+      actionName: `ROLLBACK_${execution.actionType}`,
+      affectedUrl: execution.targetUrl,
+      triggeredBy: userId ? `USER_${userId}` : 'AUTONOMOUS_ROLLBACK_ENGINE',
+      reason: reason || rollbackResult.message || 'Action rolled back',
+      beforeStateJson: execution.afterEvidenceJson,
+      afterStateJson: JSON.stringify(rollbackResult.restoredState),
+      isReversible: true,
+      isReverted: true,
+      correlationId: execution.idempotencyKey,
+    });
+
+    await OutboxDispatcher.recordEvent({
+      aggregateType: 'ACTION_EXECUTION',
+      aggregateId: actionExecutionId,
+      eventType: 'ACTION_ROLLED_BACK',
+      payload: {
+        actionExecutionId,
+        websiteId,
+        reason,
+        restoredState: rollbackResult.restoredState,
+      },
+    });
+
+    return {
+      success: true,
+      message: rollbackResult.message || 'Successfully rolled back action and restored pre-state',
+      restoredState: rollbackResult.restoredState,
+    };
+  }
+}

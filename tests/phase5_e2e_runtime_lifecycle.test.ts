@@ -13,8 +13,20 @@ describe('Phase 5 Complete End-to-End Runtime Lifecycle Test', () => {
   const canonicalUrl = 'https://hardening.techscale.io/canonical-target-page';
   const platform = 'WORDPRESS';
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    process.env.AUTONOMOUS_EXECUTION_ENABLED = 'true';
     ActionSnapshotService.simulateWorkerRestart();
+    await prisma.website.upsert({
+      where: { id: websiteId },
+      update: { domain: 'hardening.techscale.io' },
+      create: {
+        id: websiteId,
+        domain: 'hardening.techscale.io',
+        businessCategory: 'Tech',
+        riskTier: 'STANDARD',
+        autonomyMode: 'FULL_AUTO',
+      },
+    });
   });
 
   it('executes full autonomous lifecycle: Signal -> Recommendation -> Approval -> Queue -> Executor -> Verification -> Rollback', async () => {

@@ -78,11 +78,14 @@ export class CausalAttributionEngine {
       throw new Error(`Cannot evaluate attribution: URL Identity could not be resolved for '${actionExecutionId}'`);
     }
 
-    // 2. Define Temporal Windows
+    // 2. Define Temporal Windows (Pre: T-30d to T, Post: T+14d to T+horizon)
     const executionDate = new Date(executedAt);
     const baselineStartDate = new Date(executionDate.getTime() - 30 * 24 * 60 * 60 * 1000);
     const evaluationStartDate = new Date(executionDate.getTime() + 14 * 24 * 60 * 60 * 1000); // 14-day lag
     const evaluationEndDate = new Date(executionDate.getTime() + evaluationHorizonDays * 24 * 60 * 60 * 1000);
+
+    const preDays = Math.max(1, Math.round((executionDate.getTime() - baselineStartDate.getTime()) / (24 * 60 * 60 * 1000)));
+    const postDays = Math.max(1, Math.round((evaluationEndDate.getTime() - evaluationStartDate.getTime()) / (24 * 60 * 60 * 1000)));
 
     // 3. Treatment Group Metrics (Pre & Post)
     const treatmentPreFacts = await prisma.gscSearchAnalyticsFact.findMany({
@@ -103,11 +106,11 @@ export class CausalAttributionEngine {
 
     const preClicks = treatmentPreFacts.reduce((sum, f) => sum + f.clicks, 0);
     const postClicks = treatmentPostFacts.reduce((sum, f) => sum + f.clicks, 0);
-    const clickLiftDelta = postClicks - preClicks;
+    const clickLiftDelta = Number((postClicks - preClicks).toFixed(2));
 
     const preImpressions = treatmentPreFacts.reduce((sum, f) => sum + f.impressions, 0);
     const postImpressions = treatmentPostFacts.reduce((sum, f) => sum + f.impressions, 0);
-    const impressionLiftDelta = postImpressions - preImpressions;
+    const impressionLiftDelta = Number((postImpressions - preImpressions).toFixed(2));
 
     const preCtr = preImpressions > 0 ? Number((preClicks / preImpressions).toFixed(4)) : 0.0;
     const postCtr = postImpressions > 0 ? Number((postClicks / postImpressions).toFixed(4)) : 0.0;
@@ -173,7 +176,8 @@ export class CausalAttributionEngine {
       });
       const controlPostClicks = controlPostFacts.reduce((sum, f) => sum + f.clicks, 0);
       match.baselinePostClicks = controlPostClicks;
-      controlLiftSum += (controlPostClicks - match.baselinePreClicks);
+      const controlLift = controlPostClicks - match.baselinePreClicks;
+      controlLiftSum += controlLift;
     }
 
     const syntheticControlDelta =
@@ -423,4 +427,52 @@ export class CausalAttributionEngine {
       controlMatchesCount: controlMatches.length,
     };
   }
+
+  /**
+   * Normalized 30-day equivalent causal lift calculation.
+   */
+  public static calculateLift(params: {
+    treatmentWindow: {
+      preMetrics: { clicks: number; impressions: number };
+      postMetrics: { clicks: number; impressions: number };
+      windowDays?: number;
+    };
+    controlWindow: {
+      preMetrics: { clicks: number; impressions: number };
+      postMetrics: { clicks: number; impressions: number };
+      windowDays?: number;
+    };
+    similarityScore?: number;
+  }): {
+    isValid: boolean;
+    liftAbsoluteClicks: number;
+    liftPctClicks: number;
+    netCausalLift: number;
+    liftAbsoluteImpressions: number;
+  } {
+    const { treatmentWindow, controlWindow, similarityScore = 1.0 } = params;
+    const treatDays = treatmentWindow.windowDays || 30;
+    const ctrlDays = controlWindow.windowDays || 30;
+
+    const treatDailyPre = treatmentWindow.preMetrics.clicks / treatDays;
+    const treatDailyPost = treatmentWindow.postMetrics.clicks / treatDays;
+    const treatLift30d = (treatDailyPost - treatDailyPre) * 30;
+
+    const ctrlDailyPre = controlWindow.preMetrics.clicks / ctrlDays;
+    const ctrlDailyPost = controlWindow.postMetrics.clicks / ctrlDays;
+    const ctrlLift30d = (ctrlDailyPost - ctrlDailyPre) * 30;
+
+    const netCausalLift = Number((treatLift30d - ctrlLift30d).toFixed(2));
+    const preClicks = treatmentWindow.preMetrics.clicks;
+    const liftPctClicks = preClicks > 0 ? Number(((treatmentWindow.postMetrics.clicks - preClicks) / preClicks).toFixed(4)) : 0;
+
+    return {
+      isValid: similarityScore >= 0.50,
+      liftAbsoluteClicks: Number(treatLift30d.toFixed(2)),
+      liftPctClicks,
+      netCausalLift,
+      liftAbsoluteImpressions: treatmentWindow.postMetrics.impressions - treatmentWindow.preMetrics.impressions,
+    };
+  }
 }
+

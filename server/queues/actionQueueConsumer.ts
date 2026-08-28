@@ -2,7 +2,7 @@ import { Worker, Job } from 'bullmq';
 import { getRedisConnection } from '../config/redis';
 import { prisma } from '../db/prisma';
 import { ActionJobData } from './actionQueueProducer';
-import { ActionOrchestrationService } from '../services/action/actionOrchestrationService';
+import { ActionExecutionPipeline } from '../services/action/actionExecutionPipeline';
 import { DecisionEvaluationService } from '../services/decision/decisionEvaluationService';
 
 export class ActionQueueConsumer {
@@ -31,20 +31,21 @@ export class ActionQueueConsumer {
             if (!actionType || !targetUrl || !payload || !idempotencyKey) {
               throw new Error('Missing required action execution parameters in queue job');
             }
-            await ActionOrchestrationService.executeAction({
+            await ActionExecutionPipeline.execute({
               websiteId,
               taskId,
               actionType,
               targetUrl,
               payload,
               idempotencyKey,
+              executionMode: 'AUTONOMOUS',
               userId,
             });
           } else if (jobType === 'ROLLBACK_ACTION') {
             if (!actionExecutionId) {
               throw new Error('Missing actionExecutionId for rollback job');
             }
-            await ActionOrchestrationService.rollbackAction({
+            await ActionExecutionPipeline.rollback({
               actionExecutionId,
               websiteId,
               userId,
