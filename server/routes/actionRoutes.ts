@@ -199,6 +199,21 @@ router.post('/approval-center/propose', requireWebsiteAccess('EDITOR'), async (r
 // POST /api/actions/approval-center/:id/approve
 router.post('/approval-center/:id/approve', requireWorkspaceAuth('ADMIN'), async (req: Request, res: Response) => {
   try {
+    const existing = await prisma.actionApprovalRequest.findUnique({
+      where: { id: req.params.id },
+      include: { website: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'APPROVAL_NOT_FOUND', message: 'Approval request not found.' });
+    }
+
+    const workspaceId = existing.website.workspaceId;
+    const isSystem = req.principal?.userId === 'SYSTEM' || req.principal?.userId === 'ADMIN';
+    const hasMembership = isSystem || req.principal?.workspaceMemberships?.some(m => m.workspaceId === workspaceId && ['OWNER', 'ADMIN'].includes(m.role));
+    if (!hasMembership) {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'User is not authorized for this approval request website workspace.' });
+    }
+
     const userId = req.principal?.userId || 'ADMIN';
     const item = await ActionApprovalCenter.approveAction({
       actionId: req.params.id,
@@ -214,6 +229,21 @@ router.post('/approval-center/:id/approve', requireWorkspaceAuth('ADMIN'), async
 // POST /api/actions/approval-center/:id/reject
 router.post('/approval-center/:id/reject', requireWorkspaceAuth('ADMIN'), async (req: Request, res: Response) => {
   try {
+    const existing = await prisma.actionApprovalRequest.findUnique({
+      where: { id: req.params.id },
+      include: { website: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'APPROVAL_NOT_FOUND', message: 'Approval request not found.' });
+    }
+
+    const workspaceId = existing.website.workspaceId;
+    const isSystem = req.principal?.userId === 'SYSTEM' || req.principal?.userId === 'ADMIN';
+    const hasMembership = isSystem || req.principal?.workspaceMemberships?.some(m => m.workspaceId === workspaceId && ['OWNER', 'ADMIN'].includes(m.role));
+    if (!hasMembership) {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'User is not authorized for this approval request website workspace.' });
+    }
+
     const userId = req.principal?.userId || 'ADMIN';
     const item = await ActionApprovalCenter.rejectAction({
       actionId: req.params.id,
@@ -228,6 +258,21 @@ router.post('/approval-center/:id/reject', requireWorkspaceAuth('ADMIN'), async 
 
 // GET /api/actions/approval-center/:id/logs
 router.get('/approval-center/:id/logs', requireWorkspaceAuth('VIEWER'), async (req: Request, res: Response) => {
+  const existing = await prisma.actionApprovalRequest.findUnique({
+    where: { id: req.params.id },
+    include: { website: true },
+  });
+  if (!existing) {
+    return res.status(404).json({ error: 'APPROVAL_NOT_FOUND', message: 'Approval request not found.' });
+  }
+
+  const workspaceId = existing.website.workspaceId;
+  const isSystem = req.principal?.userId === 'SYSTEM' || req.principal?.userId === 'ADMIN';
+  const hasMembership = isSystem || req.principal?.workspaceMemberships?.some(m => m.workspaceId === workspaceId);
+  if (!hasMembership) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'User is not authorized for this approval request website workspace.' });
+  }
+
   const logs = await ActionApprovalCenter.getTransitionLogs(req.params.id);
   return res.json({ logs });
 });

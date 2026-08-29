@@ -4,11 +4,12 @@ import { CrawlEngine } from '../services/crawler/crawlEngine';
 import { CrawlCoordinator } from '../services/crawler/crawlCoordinator';
 import { CrawlRepository } from '../repositories/crawlRepository';
 import { AuditLogRepository } from '../repositories/auditLogRepository';
+import { requireWebsiteAccess } from '../security/authMiddleware';
 
 const router = Router();
 
 // POST /api/crawl/url (single URL live crawl)
-router.post('/url', async (req: Request, res: Response) => {
+router.post('/url', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
     const parseResult = CrawlUrlRequestSchema.safeParse(req.body);
     if (!parseResult.success) {
@@ -20,7 +21,7 @@ router.post('/url', async (req: Request, res: Response) => {
     }
 
     const { url } = parseResult.data;
-    const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+    const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
 
     const crawlResult = await CrawlEngine.crawlSingleUrl(url);
 
@@ -49,9 +50,9 @@ router.post('/url', async (req: Request, res: Response) => {
 });
 
 // POST /api/crawl/start (full sitewide technical crawl)
-router.post('/start', async (req: Request, res: Response) => {
+router.post('/start', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+    const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
     const {
       seedUrl,
       maxUrls = 50,
@@ -110,32 +111,32 @@ router.post('/start', async (req: Request, res: Response) => {
 });
 
 // POST /api/crawl/:id/cancel
-router.post('/:id/cancel', (req: Request, res: Response) => {
+router.post('/:id/cancel', requireWebsiteAccess('EDITOR'), (req: Request, res: Response) => {
   const cancelled = CrawlCoordinator.cancelCrawl(req.params.id);
   return res.json({ success: cancelled, crawlRunId: req.params.id });
 });
 
 // POST /api/crawl/:id/pause
-router.post('/:id/pause', (req: Request, res: Response) => {
+router.post('/:id/pause', requireWebsiteAccess('EDITOR'), (req: Request, res: Response) => {
   const paused = CrawlCoordinator.pauseCrawl(req.params.id);
   return res.json({ success: paused, crawlRunId: req.params.id });
 });
 
 // POST /api/crawl/:id/resume
-router.post('/:id/resume', (req: Request, res: Response) => {
+router.post('/:id/resume', requireWebsiteAccess('EDITOR'), (req: Request, res: Response) => {
   const resumed = CrawlCoordinator.resumeCrawl(req.params.id);
   return res.json({ success: resumed, crawlRunId: req.params.id });
 });
 
 // GET /api/crawl/runs
-router.get('/runs', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/runs', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const runs = await CrawlRepository.listCrawlRuns(websiteId);
   return res.json({ runs });
 });
 
 // GET /api/crawl/runs/:id
-router.get('/runs/:id', async (req: Request, res: Response) => {
+router.get('/runs/:id', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
   const run = await CrawlRepository.getCrawlRun(req.params.id);
   if (!run) {
     return res.status(404).json({ error: 'Crawl run not found' });
@@ -153,8 +154,8 @@ router.get('/runs/:id', async (req: Request, res: Response) => {
 });
 
 // GET /api/crawl/events
-router.get('/events', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/events', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const events = await CrawlRepository.getSeoEvents(websiteId);
   return res.json({ events });
 });

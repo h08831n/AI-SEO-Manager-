@@ -187,6 +187,7 @@ model Website {
   competitorDomains CompetitorDomain[]
   competitorFacts  CompetitorDailyFact[]
   actionPreStateSnapshots ActionPreStateSnapshot[]
+  rollbackHistories RollbackExecutionHistory[]
   actionApprovalRequests ActionApprovalRequest[]
   auditLogs        AuditLog[]
   jobRuns          JobRun[]
@@ -940,6 +941,7 @@ model ActionPreStateSnapshot {
 model RollbackExecutionHistory {
   id                String          @id @default(uuid())
   actionExecutionId String
+  websiteId         String
   reason            String
   restoredStateJson String
   success           Boolean
@@ -947,8 +949,10 @@ model RollbackExecutionHistory {
   createdAt         DateTime        @default(now())
 
   actionExecution   ActionExecution @relation(fields: [actionExecutionId], references: [id], onDelete: Cascade)
+  website           Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
 
   @@index([actionExecutionId])
+  @@index([websiteId])
   @@map("rollback_execution_histories")
 }
 

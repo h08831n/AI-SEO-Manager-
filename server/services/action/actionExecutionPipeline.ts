@@ -179,6 +179,20 @@ export class ActionExecutionPipeline {
       throw new Error(`GOVERNANCE_BLOCKED: ${governance.reason}`);
     }
 
+    // Enforce grace period for autonomous runs
+    if (!isDryRun && isAutonomous && governance.gracePeriodSeconds && governance.gracePeriodSeconds > 0) {
+      let createdAtTime: number | null = null;
+      if (recommendationId) {
+        const rec = await prisma.seoRecommendation.findUnique({ where: { id: recommendationId } });
+        if (rec) createdAtTime = new Date(rec.createdAt).getTime();
+      }
+      if (createdAtTime && (Date.now() - createdAtTime) < (governance.gracePeriodSeconds * 1000)) {
+        throw new Error(
+          `GRACE_PERIOD_ACTIVE: Autonomous execution blocked pending ${governance.gracePeriodSeconds}s governance grace period.`
+        );
+      }
+    }
+
     // High and Critical risk actions MUST have human approval if running autonomously
     let boundApprovalId: string | undefined = params.approvalRequestId;
     if (!isDryRun && isAutonomous && (riskTier === 'CRITICAL' || riskTier === 'HIGH')) {
@@ -225,6 +239,22 @@ export class ActionExecutionPipeline {
       }
     }
 
+    // Validate targetUrl belongs to authorized website domain
+    if (website.domain) {
+      try {
+        const targetHost = new URL(targetUrl).hostname.toLowerCase();
+        const expectedDomain = website.domain.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+        if (targetHost !== expectedDomain && !targetHost.endsWith(`.${expectedDomain}`)) {
+          throw new Error(
+            `TARGET_DOMAIN_MISMATCH: Target URL host "${targetHost}" does not match authorized website domain "${expectedDomain}".`
+          );
+        }
+      } catch (err: any) {
+        if (err.message.includes('TARGET_DOMAIN_MISMATCH')) throw err;
+        throw new Error(`INVALID_TARGET_URL: Target URL "${targetUrl}" is invalid: ${err.message}`);
+      }
+    }
+
     // 6. Target & Executor Resolution
     const target = {
       websiteId,
@@ -253,29 +283,9 @@ export class ActionExecutionPipeline {
       };
     }
 
-    // 8. Capture Pre-State Snapshot
-    const preStateSnapshot = typeof (executor as any).capturePreState === 'function'
-      ? await (executor as any).capturePreState(target)
-      : (typeof (executor as any).getCurrentState === 'function'
-        ? await (executor as any).getCurrentState(target)
-        : {});
+    // 8. Prepare Execution ID and create ActionExecution in PREPARING state (PostgreSQL FK order compliant)
     const executionId = `exec-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-    // Bind approval request if present
-    if (boundApprovalId) {
-      await ActionApprovalCenter.markExecuting(boundApprovalId, executionId, userId || 'SYSTEM');
-    }
-
-    // Persist durable snapshot (survives worker restarts)
-    await ActionSnapshotService.savePreStateSnapshot({
-      actionExecutionId: executionId,
-      websiteId,
-      targetUrl,
-      actionType,
-      preState: preStateSnapshot,
-    });
-
-    // 9. Create ActionExecution Record in EXECUTING state
     const actionExecution = await prisma.actionExecution.create({
       data: {
         id: executionId,
@@ -285,13 +295,42 @@ export class ActionExecutionPipeline {
         actionType,
         targetUrl,
         idempotencyKey,
-        state: ActionStatus.EXECUTING,
-        beforeEvidenceJson: JSON.stringify(preStateSnapshot),
+        state: ActionStatus.RECOMMENDED,
         requestedByUserId: userId,
       },
     });
 
-    // 10. Execute Mutation through Authoritative Executor
+    // 9. Capture Pre-State Snapshot
+    const preStateSnapshot = typeof (executor as any).capturePreState === 'function'
+      ? await (executor as any).capturePreState(target)
+      : (typeof (executor as any).getCurrentState === 'function'
+        ? await (executor as any).getCurrentState(target)
+        : {});
+
+    // Bind approval request if present
+    if (boundApprovalId) {
+      await ActionApprovalCenter.markExecuting(boundApprovalId, executionId, userId || 'SYSTEM');
+    }
+
+    // Persist durable pre-state snapshot (FK relation to actionExecution is satisfied)
+    await ActionSnapshotService.savePreStateSnapshot({
+      actionExecutionId: executionId,
+      websiteId,
+      targetUrl,
+      actionType,
+      preState: preStateSnapshot,
+    });
+
+    // 10. Atomically transition ActionExecution to EXECUTING state
+    await prisma.actionExecution.update({
+      where: { id: executionId },
+      data: {
+        state: ActionStatus.EXECUTING,
+        beforeEvidenceJson: JSON.stringify(preStateSnapshot),
+      },
+    });
+
+    // 11. Execute Mutation through Authoritative Executor
     let execResult: any;
     try {
       execResult = await executor.apply(target, payload, preStateSnapshot);
@@ -521,6 +560,25 @@ export class ActionExecutionPipeline {
     const executor = ActionExecutorRouter.getExecutor(execution.actionType);
     const rollbackResult = await executor.rollback(target, preStateSnapshot);
 
+    // Independent Rollback Verification
+    let rollbackVerified = true;
+    try {
+      const rollbackVerification = await VerificationEngine.runStage1SyntheticVerification({
+        actionExecutionId,
+        websiteId,
+        actionType: execution.actionType,
+        targetUrl: execution.targetUrl,
+        expectedState: preStateSnapshot,
+        ruleKey: execution.recommendation?.ruleKey || undefined,
+        platform,
+      });
+      if (rollbackVerification.requiresRollback) {
+        rollbackVerified = false;
+      }
+    } catch {
+      // Best effort verification check
+    }
+
     // Update ActionExecution state to REVERTED_RESTORED
     await prisma.actionExecution.update({
       where: { id: actionExecutionId },
@@ -545,7 +603,7 @@ export class ActionExecutionPipeline {
       rolledBackByUserId: userId,
       reason: reason || 'Rollback triggered',
       preStateRestored: rollbackResult.restoredState,
-      success: rollbackResult.success,
+      success: rollbackResult.success && rollbackVerified,
       durationMs: Date.now() - startTime,
     });
 

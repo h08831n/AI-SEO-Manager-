@@ -4,13 +4,14 @@ import { DiagnosisRuleCatalog } from '../services/decision/rules/diagnosisRuleCa
 import { LearningLoopEngine } from '../services/decision/learningLoopEngine';
 import { ActionQueueProducer } from '../queues/actionQueueProducer';
 import { RuleWeightResolver } from '../services/bayesian/ruleWeightResolver';
+import { requireWebsiteAccess } from '../security/authMiddleware';
 
 const router = Router();
 
 // POST /api/decision/evaluate
-router.post('/evaluate', async (req: Request, res: Response) => {
+router.post('/evaluate', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = (req.headers['x-website-id'] as string) || (req.body.websiteId as string) || 'site-techscale-prod';
+    const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || (req.body.websiteId as string) || 'site-techscale-prod';
     const asyncMode = req.query.async === 'true';
 
     if (asyncMode) {
@@ -38,8 +39,8 @@ router.post('/evaluate', async (req: Request, res: Response) => {
 });
 
 // GET /api/decision/rules
-router.get('/rules', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || (req.query.websiteId as string);
+router.get('/rules', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || (req.query.websiteId as string);
   const rules = DiagnosisRuleCatalog.getAllRules().map((r) => ({
     id: r.id,
     version: r.version,
@@ -59,9 +60,8 @@ router.get('/rules', async (req: Request, res: Response) => {
   return res.json({ rules });
 });
 
-
 // GET /api/decision/learning-stats
-router.get('/learning-stats', async (req: Request, res: Response) => {
+router.get('/learning-stats', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
   const profiles = LearningLoopEngine.getAllProfiles();
   return res.json({ profiles });
 });

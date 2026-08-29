@@ -12,7 +12,7 @@ export class StaticSiteCmsProvider implements ICmsActionProvider {
   readonly mode: CmsProviderMode;
 
   constructor(mode?: CmsProviderMode) {
-    this.mode = mode || (isProductionMode() ? 'PRODUCTION' : 'SIMULATION');
+    this.mode = mode || 'SIMULATION';
   }
 
   private deployedCanonicals: Map<string, string> = new Map();

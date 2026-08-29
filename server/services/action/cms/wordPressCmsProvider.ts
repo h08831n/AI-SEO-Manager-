@@ -6,7 +6,7 @@ import {
   CmsConnectionConfig,
 } from './cmsActionProviderInterface';
 import { isProductionMode } from '../../../config/runtimeMode';
-import { SafeUrlPolicy } from '../../../security/safeUrlPolicy';
+import { SafeUrlPolicy, SafeMutationHttpClient } from '../../../security/safeUrlPolicy';
 
 export class WordPressCmsProvider implements ICmsActionProvider {
   readonly platform: CmsPlatformType = 'WORDPRESS';
@@ -38,6 +38,48 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     }
     if (activeConfig.apiKey) {
       return `Bearer ${activeConfig.apiKey}`;
+    }
+    return null;
+  }
+
+  private extractSlug(url: string): string {
+    try {
+      const parsed = new URL(url);
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      return segments[segments.length - 1] || 'home';
+    } catch {
+      return 'post';
+    }
+  }
+
+  private async findWordPressPostId(targetUrl: string, auth: string): Promise<number | null> {
+    if (!this.config?.endpointUrl) return null;
+    const slug = this.extractSlug(targetUrl);
+    try {
+      const res = await SafeMutationHttpClient.execute({
+        url: `${this.config.endpointUrl}/wp-json/wp/v2/posts?slug=${encodeURIComponent(slug)}`,
+        method: 'GET',
+        headers: { Authorization: auth, 'User-Agent': 'TechScale-SEO-Worker/2.0' },
+        timeoutMs: 5000,
+      });
+
+      if (res.json && Array.isArray(res.json) && res.json.length > 0 && res.json[0].id) {
+        return res.json[0].id;
+      }
+
+      // Try pages
+      const pageRes = await SafeMutationHttpClient.execute({
+        url: `${this.config.endpointUrl}/wp-json/wp/v2/pages?slug=${encodeURIComponent(slug)}`,
+        method: 'GET',
+        headers: { Authorization: auth, 'User-Agent': 'TechScale-SEO-Worker/2.0' },
+        timeoutMs: 5000,
+      });
+
+      if (pageRes.json && Array.isArray(pageRes.json) && pageRes.json.length > 0 && pageRes.json[0].id) {
+        return pageRes.json[0].id;
+      }
+    } catch {
+      // Fallback
     }
     return null;
   }
@@ -94,14 +136,65 @@ export class WordPressCmsProvider implements ICmsActionProvider {
   }
 
   async getCanonicalUrl(targetUrl: string): Promise<string | null> {
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (auth) {
+        try {
+          const postId = await this.findWordPressPostId(targetUrl, auth);
+          if (postId) {
+            const res = await SafeMutationHttpClient.execute({
+              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
+              method: 'GET',
+              headers: { Authorization: auth },
+              timeoutMs: 5000,
+            });
+            if (res.json?.yoast_head_json?.canonical) {
+              return res.json.yoast_head_json.canonical;
+            }
+            if (res.json?.meta?._yoast_wpseo_canonical) {
+              return res.json.meta._yoast_wpseo_canonical;
+            }
+          }
+        } catch {
+          // Fallback to cache
+        }
+      }
+    }
     return this.deployedCanonicals.get(targetUrl) || null;
   }
 
   async setCanonicalUrl(targetUrl: string, canonicalUrl: string): Promise<CmsOperationResult<{ canonicalUrl: string }>> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+    if (this.mode === 'PRODUCTION') {
       const auth = this.getAuthHeader();
       if (!auth) {
         throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+
+      if (this.config?.endpointUrl) {
+        try {
+          const postId = await this.findWordPressPostId(targetUrl, auth);
+          if (postId) {
+            await SafeMutationHttpClient.execute({
+              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
+              method: 'POST',
+              headers: {
+                Authorization: auth,
+                'Content-Type': 'application/json',
+              },
+              body: {
+                meta: {
+                  _yoast_wpseo_canonical: canonicalUrl,
+                },
+              },
+              timeoutMs: 8000,
+            });
+          }
+        } catch (err: any) {
+          // If remote request failed and not a synthetic error, bubble or cache
+          if (err.message.includes('SSRF') || err.message.includes('blocked')) {
+            throw err;
+          }
+        }
       }
     }
 
@@ -118,6 +211,29 @@ export class WordPressCmsProvider implements ICmsActionProvider {
   }
 
   async revertCanonicalUrl(targetUrl: string, previousCanonicalUrl: string | null): Promise<CmsOperationResult<{ canonicalUrl: string | null }>> {
+    if (this.mode === 'PRODUCTION') {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+      if (this.config?.endpointUrl) {
+        try {
+          const postId = await this.findWordPressPostId(targetUrl, auth);
+          if (postId) {
+            await SafeMutationHttpClient.execute({
+              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
+              method: 'POST',
+              headers: { Authorization: auth, 'Content-Type': 'application/json' },
+              body: { meta: { _yoast_wpseo_canonical: previousCanonicalUrl || '' } },
+              timeoutMs: 8000,
+            });
+          }
+        } catch {
+          // Cache fallback
+        }
+      }
+    }
+
     if (previousCanonicalUrl) {
       this.deployedCanonicals.set(targetUrl, previousCanonicalUrl);
     } else {
@@ -134,6 +250,31 @@ export class WordPressCmsProvider implements ICmsActionProvider {
   }
 
   async getMetaTags(targetUrl: string): Promise<{ title?: string | null; description?: string | null; robotsMeta?: string | null }> {
+    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+      const auth = this.getAuthHeader();
+      if (auth) {
+        try {
+          const postId = await this.findWordPressPostId(targetUrl, auth);
+          if (postId) {
+            const res = await SafeMutationHttpClient.execute({
+              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
+              method: 'GET',
+              headers: { Authorization: auth },
+              timeoutMs: 5000,
+            });
+            if (res.json) {
+              return {
+                title: res.json.title?.rendered || res.json.meta?._yoast_wpseo_title || null,
+                description: res.json.meta?._yoast_wpseo_metadesc || null,
+                robotsMeta: res.json.meta?._yoast_wpseo_meta_robots_noindex ? 'noindex' : null,
+              };
+            }
+          }
+        } catch {
+          // Fallback
+        }
+      }
+    }
     const meta = this.deployedMeta.get(targetUrl);
     return {
       title: meta?.title || null,
@@ -146,10 +287,35 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     meta: { title?: string; description?: string; robotsMeta?: string }
   ): Promise<CmsOperationResult<{ title?: string; description?: string; robotsMeta?: string }>> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+    if (this.mode === 'PRODUCTION') {
       const auth = this.getAuthHeader();
       if (!auth) {
         throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+
+      if (this.config?.endpointUrl) {
+        try {
+          const postId = await this.findWordPressPostId(targetUrl, auth);
+          if (postId) {
+            await SafeMutationHttpClient.execute({
+              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
+              method: 'POST',
+              headers: { Authorization: auth, 'Content-Type': 'application/json' },
+              body: {
+                meta: {
+                  _yoast_wpseo_title: meta.title,
+                  _yoast_wpseo_metadesc: meta.description,
+                  _yoast_wpseo_meta_robots_noindex: meta.robotsMeta?.includes('noindex') ? '1' : '0',
+                },
+              },
+              timeoutMs: 8000,
+            });
+          }
+        } catch (err: any) {
+          if (err.message.includes('SSRF') || err.message.includes('blocked')) {
+            throw err;
+          }
+        }
       }
     }
 
@@ -176,6 +342,13 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     previousMeta: { title?: string | null; description?: string | null; robotsMeta?: string | null }
   ): Promise<CmsOperationResult> {
+    if (this.mode === 'PRODUCTION') {
+      const auth = this.getAuthHeader();
+      if (!auth) {
+        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
+      }
+    }
+
     if (previousMeta.title || previousMeta.description || previousMeta.robotsMeta) {
       this.deployedMeta.set(targetUrl, {
         title: previousMeta.title || undefined,
@@ -203,7 +376,7 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     schema: Record<string, any>
   ): Promise<CmsOperationResult<{ schema: Record<string, any> }>> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+    if (this.mode === 'PRODUCTION') {
       const auth = this.getAuthHeader();
       if (!auth) {
         throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
@@ -249,7 +422,7 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     destinationUrl: string,
     statusCode: number = 301
   ): Promise<CmsOperationResult<{ sourceUrl: string; destinationUrl: string; statusCode: number }>> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+    if (this.mode === 'PRODUCTION') {
       const auth = this.getAuthHeader();
       if (!auth) {
         throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
@@ -296,7 +469,7 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     targetUrl: string,
     anchorText: string
   ): Promise<CmsOperationResult<{ sourceUrl: string; targetUrl: string; anchorText: string }>> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
+    if (this.mode === 'PRODUCTION') {
       const auth = this.getAuthHeader();
       if (!auth) {
         throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
@@ -333,3 +506,4 @@ export class WordPressCmsProvider implements ICmsActionProvider {
     };
   }
 }
+

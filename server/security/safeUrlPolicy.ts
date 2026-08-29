@@ -357,4 +357,167 @@ export class SafeUrlPolicy {
 
     throw new Error(`Exceeded maximum redirect limit of ${maxRedirects}`);
   }
+
+  public static async safeMutateRequest(
+    targetUrl: string,
+    options: {
+      method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+      headers?: Record<string, string>;
+      body?: any;
+      timeoutMs?: number;
+      maxRedirects?: number;
+    } = {}
+  ): Promise<{
+    statusCode: number;
+    headers: Record<string, string>;
+    body: string;
+    json?: any;
+  }> {
+    const {
+      method = 'POST',
+      headers = {},
+      body,
+      timeoutMs = 10000,
+      maxRedirects = 3,
+    } = options;
+
+    let currentUrl = targetUrl;
+    let redirectCount = 0;
+
+    while (redirectCount <= maxRedirects) {
+      let parsed: URL;
+      try {
+        parsed = new URL(currentUrl);
+      } catch {
+        throw new Error(`Invalid URL: ${currentUrl}`);
+      }
+
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error(`Protocol "${parsed.protocol}" not allowed. Only HTTP and HTTPS are permitted.`);
+      }
+
+      const destCheck = await SafeDestinationPolicy.resolveAndValidate(parsed.hostname);
+      if (!destCheck.valid) {
+        throw new Error(`SSRF Guard blocked mutation request to ${currentUrl}: ${destCheck.error}`);
+      }
+
+      const pinnedIp = destCheck.resolvedIps[0];
+
+      const dispatcher = new Agent({
+        connect: {
+          lookup: (_hostname: string, _opts: any, cb: any) => {
+            if (SafeDestinationPolicy.isIpBlocked(pinnedIp)) {
+              cb(new Error(`SSRF TOCTOU Guard: Target IP ${pinnedIp} is blocked`), null as any, 4);
+            } else {
+              cb(null, pinnedIp, net.isIPv6(pinnedIp) ? 6 : 4);
+            }
+          },
+          rejectUnauthorized: true,
+          servername: parsed.hostname,
+        },
+      });
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      let payloadString: string | undefined = undefined;
+      const requestHeaders: Record<string, string> = {
+        'User-Agent': 'Mozilla/5.0 (compatible; AI-SEO-Manager-MutationEngine/2.0)',
+        ...headers,
+      };
+
+      if (body !== undefined && body !== null) {
+        if (typeof body === 'string') {
+          payloadString = body;
+        } else if (Buffer.isBuffer(body)) {
+          payloadString = body.toString('utf-8');
+        } else {
+          payloadString = JSON.stringify(body);
+          if (!requestHeaders['content-type'] && !requestHeaders['Content-Type']) {
+            requestHeaders['Content-Type'] = 'application/json';
+          }
+        }
+      }
+
+      try {
+        const response = await undiciFetch(currentUrl, {
+          method,
+          headers: requestHeaders,
+          body: payloadString,
+          signal: controller.signal,
+          redirect: 'manual',
+          dispatcher,
+        });
+
+        clearTimeout(timeoutId);
+
+        // Check for redirects
+        if ([301, 302, 303, 307, 308].includes(response.status)) {
+          const location = response.headers.get('location');
+          if (!location) {
+            throw new Error(`Redirect ${response.status} missing Location header`);
+          }
+
+          const nextUrl = new URL(location, currentUrl).toString();
+          redirectCount++;
+
+          if (currentUrl.startsWith('https://') && nextUrl.startsWith('http://')) {
+            throw new Error(`SSRF Guard: Insecure redirect downgrade from HTTPS to HTTP blocked: ${nextUrl}`);
+          }
+
+          if (redirectCount > maxRedirects) {
+            throw new Error(`Exceeded maximum redirect limit of ${maxRedirects}`);
+          }
+
+          currentUrl = nextUrl;
+          continue;
+        }
+
+        const bodyText = await response.text();
+        const headersMap: Record<string, string> = {};
+        response.headers.forEach((val, key) => {
+          headersMap[key.toLowerCase()] = val;
+        });
+
+        let json: any = undefined;
+        try {
+          json = JSON.parse(bodyText);
+        } catch {
+          // not JSON
+        }
+
+        return {
+          statusCode: response.status,
+          headers: headersMap,
+          body: bodyText,
+          json,
+        };
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+          throw new Error(`Mutation request timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+      }
+    }
+
+    throw new Error(`Exceeded maximum redirect limit of ${maxRedirects}`);
+  }
+}
+
+export class SafeMutationHttpClient {
+  public static async execute(params: {
+    url: string;
+    method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    headers?: Record<string, string>;
+    body?: any;
+    timeoutMs?: number;
+  }) {
+    return SafeUrlPolicy.safeMutateRequest(params.url, {
+      method: params.method,
+      headers: params.headers,
+      body: params.body,
+      timeoutMs: params.timeoutMs,
+    });
+  }
 }

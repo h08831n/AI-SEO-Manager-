@@ -33,7 +33,7 @@ export class VerificationEngine {
           httpStatus: parsedDom.httpStatus,
           title: parsedDom.title,
         };
-        passed = parsedDom.canonicalUrl === expectedState.canonicalUrl;
+        passed = (!expectedState.canonicalUrl && !parsedDom.canonicalUrl) || (parsedDom.canonicalUrl === expectedState.canonicalUrl);
         if (!passed) {
           varianceDetails = `Expected canonical "${expectedState.canonicalUrl}", but observed in parsed DOM "${parsedDom.canonicalUrl || '<none>'}"`;
         }
@@ -271,29 +271,40 @@ export class VerificationEngine {
       actionExecutionId,
       websiteId,
       ruleKey,
-      preRank = 10,
-      postRank = 8,
       preConversions = 0,
       postConversions = 0,
     } = params;
 
     let preClicks = params.preClicks;
     let postClicks = params.postClicks;
+    let preRank = params.preRank ?? 0;
+    let postRank = params.postRank ?? 0;
 
     if (preClicks === undefined || postClicks === undefined) {
       const execution = await prisma.actionExecution.findUnique({
         where: { id: actionExecutionId },
       });
       const targetUrl = execution?.targetUrl;
+      const executionDate = execution?.createdAt || new Date();
+
       if (targetUrl) {
         const facts = await prisma.gscSearchAnalyticsFact.findMany({
           where: { websiteId, pageUrl: targetUrl },
-          orderBy: { date: 'desc' },
-          take: 30,
+          orderBy: { date: 'asc' },
         });
-        const totalClicks = facts.reduce((sum, f) => sum + f.clicks, 0);
-        preClicks = preClicks !== undefined ? preClicks : Math.max(0, Math.floor(totalClicks * 0.45));
-        postClicks = postClicks !== undefined ? postClicks : Math.max(0, Math.floor(totalClicks * 0.55));
+
+        const preFacts = facts.filter(f => new Date(f.date) < executionDate);
+        const postFacts = facts.filter(f => new Date(f.date) >= executionDate);
+
+        preClicks = preClicks !== undefined ? preClicks : preFacts.reduce((sum, f) => sum + f.clicks, 0);
+        postClicks = postClicks !== undefined ? postClicks : postFacts.reduce((sum, f) => sum + f.clicks, 0);
+
+        if (params.preRank === undefined && preFacts.length > 0) {
+          preRank = Number((preFacts.reduce((sum, f) => sum + (f.position || 0), 0) / preFacts.length).toFixed(1));
+        }
+        if (params.postRank === undefined && postFacts.length > 0) {
+          postRank = Number((postFacts.reduce((sum, f) => sum + (f.position || 0), 0) / postFacts.length).toFixed(1));
+        }
       } else {
         preClicks = preClicks || 0;
         postClicks = postClicks || 0;

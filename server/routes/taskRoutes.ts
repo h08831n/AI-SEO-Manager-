@@ -1,20 +1,21 @@
 import { Router, Request, Response } from 'express';
 import { TaskRepository } from '../repositories/taskRepository';
 import { AuditLogRepository } from '../repositories/auditLogRepository';
+import { requireWebsiteAccess } from '../security/authMiddleware';
 import { z } from 'zod';
 
 const router = Router();
 
 // GET /api/tasks
-router.get('/', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const tasks = await TaskRepository.listTasks(websiteId);
   return res.json({ tasks });
 });
 
 // GET /api/recommendations
-router.get('/recommendations', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/recommendations', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const recommendations = await TaskRepository.listRecommendations(websiteId);
   return res.json({ recommendations });
 });
@@ -25,8 +26,8 @@ const ExecuteTaskSchema = z.object({
   isSimulation: z.boolean().default(false),
 });
 
-router.post('/:id/execute', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.post('/:id/execute', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const parseResult = ExecuteTaskSchema.safeParse(req.body);
 
   if (!parseResult.success) {
@@ -59,8 +60,8 @@ router.post('/:id/execute', async (req: Request, res: Response) => {
 });
 
 // GET /api/audit-logs
-router.get('/audit-logs', async (req: Request, res: Response) => {
-  const websiteId = (req.headers['x-website-id'] as string) || 'site-techscale-prod';
+router.get('/audit-logs', requireWebsiteAccess('VIEWER'), async (req: Request, res: Response) => {
+  const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || 'site-techscale-prod';
   const logs = await AuditLogRepository.listForWebsite(websiteId);
   return res.json({ logs });
 });

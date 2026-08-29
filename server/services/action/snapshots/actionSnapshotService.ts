@@ -158,6 +158,7 @@ export class ActionSnapshotService {
       data: {
         id: historyEntry.id,
         actionExecutionId,
+        websiteId,
         reason,
         restoredStateJson,
         success,
@@ -184,6 +185,7 @@ export class ActionSnapshotService {
    */
   public static async getRollbackHistory(websiteId: string): Promise<RollbackExecutionHistory[]> {
     const histories = await prisma.rollbackExecutionHistory.findMany({
+      where: { websiteId },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -191,7 +193,7 @@ export class ActionSnapshotService {
     return histories.map((h) => ({
       id: h.id,
       actionExecutionId: h.actionExecutionId,
-      websiteId,
+      websiteId: h.websiteId || websiteId,
       rolledBackByUserId: h.actorId,
       reason: h.reason,
       preStateRestoredJson: h.restoredStateJson,

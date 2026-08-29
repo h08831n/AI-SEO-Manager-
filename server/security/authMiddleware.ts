@@ -74,6 +74,7 @@ export function requireWebsiteAccess(minRole: UserRole = 'VIEWER') {
       req.principal = principal;
       const websiteId =
         req.params.websiteId ||
+        (req.headers['x-website-id'] as string) ||
         (req.query.websiteId as string) ||
         (req.body && req.body.websiteId);
 

@@ -105,7 +105,7 @@ export class ActionApprovalCenter {
       }
 
       const currentState = existing.state as ApprovalState;
-      this.validateTransition(currentState, targetState);
+      ActionApprovalCenter.validateTransition(currentState, targetState);
 
       const now = new Date();
       // Atomic conditional update on current state
