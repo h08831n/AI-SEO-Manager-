@@ -15,38 +15,492 @@ import {
   IntegrationConnection,
 } from '../shared/contracts';
 
-export async function crawlUrl(url: string): Promise<CrawlUrlResponse> {
-  const response = await fetch('/api/crawl/url', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ message: 'Crawl request failed' }));
-    throw new Error(errorData.message || errorData.error || 'Crawl failed');
-  }
-  return response.json();
+// Current session storage for active workspace / auth token
+let activeWorkspaceId = 'ws-techscale-org';
+let activeAuthToken = 'mock-jwt-token-techscale';
+
+export function setActiveWorkspaceId(workspaceId: string) {
+  activeWorkspaceId = workspaceId;
 }
 
-export async function getCrawlRuns(): Promise<{ runs: any[] }> {
-  const response = await fetch('/api/crawl/runs');
-  if (!response.ok) {
-    throw new Error('Failed to fetch crawl runs');
-  }
-  return response.json();
+export function getActiveWorkspaceId(): string {
+  return activeWorkspaceId;
 }
+
+export function setAuthToken(token: string) {
+  activeAuthToken = token;
+}
+
+function getHeaders(customHeaders?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-workspace-id': activeWorkspaceId,
+  };
+  if (activeAuthToken) {
+    headers['Authorization'] = `Bearer ${activeAuthToken}`;
+  }
+  if (customHeaders) {
+    Object.assign(headers, customHeaders);
+  }
+  return headers;
+}
+
+// -------------------------------------------------------------
+// 1. Websites & Workspaces API
+// -------------------------------------------------------------
+
+export async function getWebsites(): Promise<{ websites: any[] }> {
+  const res = await fetch('/api/websites', { headers: getHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to fetch websites' }));
+    throw new Error(err.message || err.error || 'Failed to fetch websites');
+  }
+  return res.json();
+}
+
+export async function createWebsite(data: {
+  domain: string;
+  name: string;
+  productionUrl: string;
+  sitemapUrl?: string;
+  defaultLanguage?: string;
+  industry?: string;
+}): Promise<any> {
+  const res = await fetch('/api/websites', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to create website' }));
+    throw new Error(err.message || err.error || 'Failed to create website');
+  }
+  return res.json();
+}
+
+export async function getWebsiteById(id: string): Promise<any> {
+  const res = await fetch(`/api/websites/${id}`, { headers: getHeaders() });
+  if (!res.ok) throw new Error('Website not found');
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 2. Crawler & SEO Health API
+// -------------------------------------------------------------
+
+export async function crawlUrl(url: string, websiteId?: string): Promise<CrawlUrlResponse> {
+  const res = await fetch('/api/crawl/url', {
+    method: 'POST',
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ message: 'Crawl request failed' }));
+    throw new Error(errorData.message || errorData.error || 'Crawl failed');
+  }
+  return res.json();
+}
+
+export async function startFullCrawl(websiteId: string, options?: {
+  seedUrl?: string;
+  maxUrls?: number;
+  maxDepth?: number;
+  respectRobots?: boolean;
+  crawlSitemaps?: boolean;
+}): Promise<any> {
+  const res = await fetch(`/api/websites/${websiteId}/crawls`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify(options || {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to trigger crawl' }));
+    throw new Error(err.message || err.error || 'Failed to trigger crawl');
+  }
+  return res.json();
+}
+
+export async function getCrawlRuns(websiteId?: string): Promise<{ runs: any[] }> {
+  const url = websiteId ? `/api/websites/${websiteId}/crawls` : '/api/crawl/runs';
+  const res = await fetch(url, { headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}) });
+  if (!res.ok) {
+    return { runs: [] };
+  }
+  return res.json();
+}
+
+export async function getCrawledPages(websiteId: string, crawlRunId: string, query?: { page?: number; limit?: number }): Promise<any> {
+  const page = query?.page || 1;
+  const limit = query?.limit || 50;
+  const res = await fetch(`/api/websites/${websiteId}/crawls/${crawlRunId}/pages?page=${page}&limit=${limit}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) {
+    return { total: 0, pages: [] };
+  }
+  return res.json();
+}
+
+export async function getCrawlIssues(websiteId: string, crawlRunId: string, query?: { page?: number; limit?: number }): Promise<any> {
+  const page = query?.page || 1;
+  const limit = query?.limit || 100;
+  const res = await fetch(`/api/websites/${websiteId}/crawls/${crawlRunId}/issues?page=${page}&limit=${limit}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) {
+    return { total: 0, issues: [] };
+  }
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 3. AI Decisions, Rules & Recommendations
+// -------------------------------------------------------------
+
+export async function getRecommendations(websiteId?: string): Promise<{ recommendations: any[] }> {
+  const res = await fetch('/api/tasks/recommendations', {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  if (!res.ok) return { recommendations: [] };
+  return res.json();
+}
+
+export async function evaluateDecisions(websiteId: string, options?: {
+  targetUrl?: string;
+  targetKeyword?: string;
+  cmsProvider?: string;
+  pageArchetype?: string;
+  async?: boolean;
+}): Promise<any> {
+  const isAsync = options?.async ? '?async=true' : '';
+  const res = await fetch(`/api/decision/evaluate${isAsync}`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ websiteId, ...options }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Evaluation failed' }));
+    throw new Error(err.message || err.error || 'Evaluation failed');
+  }
+  return res.json();
+}
+
+export async function getDiagnosisRules(websiteId?: string): Promise<{ rules: any[]; resolvedWeights?: Record<string, number> }> {
+  const query = websiteId ? `?websiteId=${websiteId}` : '';
+  const res = await fetch(`/api/decision/rules${query}`, {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  if (!res.ok) return { rules: [] };
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 4. Actions, Approval Queue & Verification Timeline
+// -------------------------------------------------------------
+
+export async function getActionExecutions(websiteId: string): Promise<{ executions: any[] }> {
+  const res = await fetch(`/api/actions?websiteId=${websiteId}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) return { executions: [] };
+  return res.json();
+}
+
+export async function executeAction(payload: {
+  websiteId: string;
+  actionType: string;
+  targetUrl: string;
+  payload: Record<string, any>;
+  idempotencyKey: string;
+  taskId?: string;
+  recommendationId?: string;
+  executionMode?: 'MANUAL' | 'AUTONOMOUS' | 'CANARY';
+  isDryRun?: boolean;
+  autoVerify?: boolean;
+}): Promise<any> {
+  const res = await fetch('/api/actions/execute', {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': payload.websiteId }),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Execution failed' }));
+    throw new Error(err.message || err.error || 'Action execution failed');
+  }
+  return res.json();
+}
+
+export async function rollbackAction(
+  actionId: string,
+  websiteId: string,
+  reason = '1-Click User Rollback via SaaS Dashboard'
+): Promise<any> {
+  const res = await fetch(`/api/actions/${actionId}/rollback`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ websiteId, reason }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Rollback failed' }));
+    throw new Error(err.message || err.error || 'Rollback failed');
+  }
+  return res.json();
+}
+
+export async function verifyAction(
+  actionId: string,
+  websiteId: string,
+  stage: 'STAGE_1_SYNTHETIC_DOM' | 'STAGE_2_INDEX_SERP' | 'STAGE_3_TRAFFIC_CONVERSION',
+  payload?: any
+): Promise<any> {
+  const res = await fetch(`/api/actions/${actionId}/verify?stage=${stage}`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ websiteId, ...(payload || {}) }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Verification failed' }));
+    throw new Error(err.message || err.error || 'Verification failed');
+  }
+  return res.json();
+}
+
+export async function getApprovalQueue(websiteId: string, state?: string): Promise<{ items: any[] }> {
+  const query = state ? `?state=${state}` : '';
+  const res = await fetch(`/api/actions/approval-center/queue${query}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) return { items: [] };
+  return res.json();
+}
+
+export async function approveActionRequest(actionId: string, notes?: string): Promise<any> {
+  const res = await fetch(`/api/actions/approval-center/${actionId}/approve`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ notes }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Approval failed' }));
+    throw new Error(err.message || err.error || 'Approval failed');
+  }
+  return res.json();
+}
+
+export async function rejectActionRequest(actionId: string, reason?: string): Promise<any> {
+  const res = await fetch(`/api/actions/approval-center/${actionId}/reject`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ reason }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Rejection failed' }));
+    throw new Error(err.message || err.error || 'Rejection failed');
+  }
+  return res.json();
+}
+
+export async function getRollbackHistory(websiteId: string): Promise<{ history: any[] }> {
+  const res = await fetch(`/api/actions/rollback-history?websiteId=${websiteId}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) return { history: [] };
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 5. Keywords, Rankings & SERP Universe
+// -------------------------------------------------------------
+
+export async function getKeywords(websiteId: string, params?: {
+  trackingStatus?: string;
+  searchIntent?: string;
+  funnelStage?: string;
+  moneyKeyword?: boolean;
+  query?: string;
+  limit?: number;
+}): Promise<{ success: boolean; keywords: any[]; total: number }> {
+  const q = new URLSearchParams();
+  if (params?.trackingStatus) q.set('trackingStatus', params.trackingStatus);
+  if (params?.searchIntent) q.set('searchIntent', params.searchIntent);
+  if (params?.funnelStage) q.set('funnelStage', params.funnelStage);
+  if (params?.moneyKeyword !== undefined) q.set('moneyKeyword', String(params.moneyKeyword));
+  if (params?.query) q.set('query', params.query);
+  if (params?.limit) q.set('limit', String(params.limit));
+
+  const res = await fetch(`/api/keywords/websites/${websiteId}?${q.toString()}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) return { success: false, keywords: [], total: 0 };
+  return res.json();
+}
+
+export async function createKeyword(websiteId: string, data: {
+  keyword: string;
+  targetUrl?: string;
+  tags?: string[];
+  searchIntent?: string;
+}): Promise<any> {
+  const res = await fetch(`/api/keywords/websites/${websiteId}`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to add keyword' }));
+    throw new Error(err.message || err.error || 'Failed to add keyword');
+  }
+  return res.json();
+}
+
+export async function checkKeywordSerp(websiteId: string, keywordId: string, options?: { device?: 'DESKTOP' | 'MOBILE'; async?: boolean }): Promise<any> {
+  const res = await fetch(`/api/serp/websites/${websiteId}/keywords/${keywordId}/check`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify(options || {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'SERP check failed' }));
+    throw new Error(err.message || err.error || 'SERP check failed');
+  }
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 6. Analytics & Performance Intelligence
+// -------------------------------------------------------------
+
+export async function getAnalyticsPerformance(websiteId: string, startDate?: string, endDate?: string): Promise<any> {
+  const q = new URLSearchParams();
+  if (startDate) q.set('startDate', startDate);
+  if (endDate) q.set('endDate', endDate);
+
+  const res = await fetch(`/api/websites/${websiteId}/analytics/performance?${q.toString()}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Analytics fetch failed' }));
+    throw new Error(err.message || err.error || 'Analytics fetch failed');
+  }
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 7. Competitors
+// -------------------------------------------------------------
+
+export async function getCompetitors(websiteId: string, directOnly = false): Promise<{ competitors: any[] }> {
+  const res = await fetch(`/api/competitors/websites/${websiteId}?directOnly=${directOnly}`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) return { competitors: [] };
+  return res.json();
+}
+
+export async function refreshCompetitors(websiteId: string): Promise<any> {
+  const res = await fetch(`/api/competitors/websites/${websiteId}/refresh`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Competitor refresh failed' }));
+    throw new Error(err.message || err.error || 'Competitor refresh failed');
+  }
+  return res.json();
+}
+
+export async function setCompetitorExclusion(websiteId: string, domain: string, isExcluded = true, reason?: string): Promise<any> {
+  const res = await fetch(`/api/competitors/websites/${websiteId}/exclusions`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ domain, isExcluded, reason }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Competitor override failed' }));
+    throw new Error(err.message || err.error || 'Competitor override failed');
+  }
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 8. Integrations & GSC/GA4 Property Bindings
+// -------------------------------------------------------------
+
+export async function getIntegrations(websiteId?: string): Promise<{ integrations: IntegrationConnection[] }> {
+  const res = await fetch('/api/integrations', {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  if (!res.ok) return { integrations: [] };
+  return res.json();
+}
+
+export async function getGoogleAuthUrl(websiteId?: string): Promise<{ authUrl?: string; configured: boolean; message?: string }> {
+  const q = websiteId ? `?websiteId=${websiteId}` : '';
+  const res = await fetch(`/api/integrations/google/auth-url${q}`, {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  return res.json();
+}
+
+export async function getGscProperties(websiteId: string): Promise<{ properties: any[]; currentBinding: any }> {
+  const res = await fetch(`/api/integrations/websites/${websiteId}/gsc/properties`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) {
+    return { properties: [], currentBinding: null };
+  }
+  return res.json();
+}
+
+export async function bindGscProperty(websiteId: string, propertyId: string, propertyType?: string): Promise<any> {
+  const res = await fetch(`/api/integrations/websites/${websiteId}/gsc/bind`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ propertyId, propertyType }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'GSC binding failed' }));
+    throw new Error(err.message || err.error || 'GSC binding failed');
+  }
+  return res.json();
+}
+
+export async function triggerIntegrationSync(websiteId: string, provider = 'ALL', syncType = 'MANUAL_RESYNC'): Promise<any> {
+  const res = await fetch(`/api/integrations/websites/${websiteId}/sync`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ provider, syncType }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Sync failed' }));
+    throw new Error(err.message || err.error || 'Sync trigger failed');
+  }
+  return res.json();
+}
+
+export async function getSyncRuns(websiteId: string): Promise<{ syncRuns: any[] }> {
+  const res = await fetch(`/api/integrations/websites/${websiteId}/sync-runs`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) return { syncRuns: [] };
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 9. AI Copilot
+// -------------------------------------------------------------
 
 export async function askCopilot(
   question: string,
   evidenceContext?: EvidenceContext
 ): Promise<CopilotResponse> {
-  const response = await fetch('/api/copilot', {
+  const res = await fetch('/api/copilot', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ question, evidenceContext }),
   });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ reply: 'Copilot request failed' }));
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ reply: 'Copilot request failed' }));
     return {
       status: 'ERROR',
       reply: errorData.reply || errorData.message || 'Copilot server request failed.',
@@ -55,31 +509,59 @@ export async function askCopilot(
       provenance: 'DATA_UNAVAILABLE',
     };
   }
-  return response.json();
+  return res.json();
 }
 
-export async function generateBrief(req: ContentBriefRequest): Promise<ContentBriefResponse> {
-  const response = await fetch('/api/content/brief', {
+// -------------------------------------------------------------
+// 10. Observability, System Health & Tasks
+// -------------------------------------------------------------
+
+export async function getObservabilityStatus(): Promise<any> {
+  const res = await fetch('/api/observability/status', { headers: getHeaders() });
+  if (!res.ok) return { status: 'DEGRADED' };
+  return res.json();
+}
+
+export async function getTasks(websiteId?: string): Promise<{ tasks: any[] }> {
+  const res = await fetch('/api/tasks', {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  if (!res.ok) return { tasks: [] };
+  return res.json();
+}
+
+export async function executeTask(taskId: string, idempotencyKey: string, isSimulation = false): Promise<any> {
+  const res = await fetch(`/api/tasks/${taskId}/execute`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
+    body: JSON.stringify({ idempotencyKey, isSimulation }),
+  });
+  if (!res.ok) throw new Error('Task execution request failed');
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 11. Content Studio & Generation Tools
+// -------------------------------------------------------------
+
+export async function generateBrief(req: ContentBriefRequest): Promise<ContentBriefResponse> {
+  const res = await fetch('/api/content/brief', {
+    method: 'POST',
+    headers: getHeaders(),
     body: JSON.stringify(req),
   });
-  if (!response.ok) {
-    throw new Error('Brief generation failed');
-  }
-  return response.json();
+  if (!res.ok) throw new Error('Brief generation failed');
+  return res.json();
 }
 
 export async function generateRefresh(req: ContentRefreshRequest): Promise<ContentRefreshResponse> {
-  const response = await fetch('/api/content/refresh', {
+  const res = await fetch('/api/content/refresh', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify(req),
   });
-  if (!response.ok) {
-    throw new Error('Refresh diagnosis failed');
-  }
-  return response.json();
+  if (!res.ok) throw new Error('Refresh diagnosis failed');
+  return res.json();
 }
 
 export async function optimizeCtr(
@@ -100,46 +582,40 @@ export async function optimizeCtr(
           currentCtr: ctr || 1,
         }
       : reqOrTitle;
-  const response = await fetch('/api/content/ctr-optimize', {
+  const res = await fetch('/api/content/ctr-optimize', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    throw new Error('CTR optimization failed');
-  }
-  return response.json();
+  if (!res.ok) throw new Error('CTR optimization failed');
+  return res.json();
 }
 
 export async function generateSchema(
-  typeOrReq: SchemaGenerationRequest | 'Article' | 'FAQPage' | 'Product' | 'Organization' | 'BreadcrumbList' | string,
+  typeOrReq: SchemaGenerationRequest | string,
   data?: Record<string, any>
 ): Promise<SchemaGenerationResponse> {
   const payload =
     typeof typeOrReq === 'string'
       ? { type: typeOrReq as any, data: data || {} }
       : typeOrReq;
-  const response = await fetch('/api/content/schema-generate', {
+  const res = await fetch('/api/content/schema-generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    throw new Error('Schema generation failed');
-  }
-  return response.json();
+  if (!res.ok) throw new Error('Schema generation failed');
+  return res.json();
 }
 
 export async function exportToCsv(rows: any[], filename = 'seo_export.csv'): Promise<void> {
-  const response = await fetch('/api/integrations/export-csv', {
+  const res = await fetch('/api/integrations/export-csv', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ filename, rows }),
   });
-  if (!response.ok) {
-    throw new Error('CSV export failed');
-  }
-  const blob = await response.blob();
+  if (!res.ok) throw new Error('CSV export failed');
+  const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -157,67 +633,15 @@ export async function exportToWordPress(payload: {
   categories?: string[];
   tags?: string[];
 }): Promise<WordPressPreviewResponse> {
-  const response = await fetch('/api/integrations/export-wordpress', {
+  const res = await fetch('/api/integrations/export-wordpress', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    throw new Error('WordPress request failed');
-  }
-  return response.json();
+  if (!res.ok) throw new Error('WordPress request failed');
+  return res.json();
 }
 
 export async function previewWordPressPayload(payload: WordPressPreviewRequest): Promise<WordPressPreviewResponse> {
   return exportToWordPress(payload);
-}
-
-export async function getWebsites(): Promise<any> {
-  const res = await fetch('/api/websites');
-  if (!res.ok) throw new Error('Failed to load websites');
-  return res.json();
-}
-
-export async function getIntegrations(): Promise<{ integrations: IntegrationConnection[] }> {
-  const res = await fetch('/api/integrations');
-  if (!res.ok) throw new Error('Failed to load integrations');
-  return res.json();
-}
-
-export async function getTasks(): Promise<any> {
-  const res = await fetch('/api/tasks');
-  if (!res.ok) throw new Error('Failed to load tasks');
-  return res.json();
-}
-
-export async function getRecommendations(): Promise<any> {
-  const res = await fetch('/api/tasks/recommendations');
-  if (!res.ok) throw new Error('Failed to load recommendations');
-  return res.json();
-}
-
-export async function executeTask(
-  taskId: string,
-  idempotencyKey: string,
-  isSimulation = false
-): Promise<any> {
-  const res = await fetch(`/api/tasks/${taskId}/execute`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idempotencyKey, isSimulation }),
-  });
-  if (!res.ok) throw new Error('Task execution request failed');
-  return res.json();
-}
-
-export async function getAuditLogs(): Promise<any> {
-  const res = await fetch('/api/tasks/audit-logs');
-  if (!res.ok) throw new Error('Failed to load audit logs');
-  return res.json();
-}
-
-export async function getObservabilityStatus(): Promise<any> {
-  const res = await fetch('/api/observability/status');
-  if (!res.ok) throw new Error('Failed to load observability status');
-  return res.json();
 }
