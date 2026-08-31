@@ -411,3 +411,100 @@ export interface SEOChatMessage {
   timestamp: string;
 }
 
+export type AgentRole =
+  | 'TECHNICAL_AGENT'
+  | 'CONTENT_STRATEGY_AGENT'
+  | 'GROWTH_AGENT'
+  | 'COMPETITOR_AGENT'
+  | 'AUDITOR_AGENT'
+  | 'AUTOMATION_MANAGER';
+
+export type AgentStatus = 'ANALYZING' | 'EXECUTING' | 'MONITORING' | 'LEARNING' | 'IDLE';
+
+export interface SEOAgent {
+  id: string;
+  role: AgentRole;
+  name: string;
+  title: string;
+  avatarColor: string;
+  description: string;
+  status: AgentStatus;
+  currentTask: string;
+  issuesSolvedCount: number;
+  actionsExecutedCount: number;
+  successRate: number;
+  learningProgress: number;
+  activePillars: string[];
+  lastActivityTimestamp: string;
+  recentLogs: string[];
+}
+
+export type AutonomyMode = 'MANUAL' | 'SUPERVISED' | 'AUTONOMOUS';
+
+export interface SafetyConfig {
+  autonomyLevel: AutonomyMode;
+  rollbackEnabled: boolean;
+  verificationEnabled: boolean;
+  canaryRolloutPct: number;
+  bayesianDamping: number;
+  circuitBreakerActive: boolean;
+  maxActionsPerDay: number;
+  autoRollbackOnDrop: boolean;
+  slackWebhook?: string;
+}
+
+export interface DailySEOBriefData {
+  id: string;
+  generatedAt: string;
+  websiteDomain: string;
+  summary: string;
+  headline: string;
+  problemsDetectedCount: number;
+  actionsCompletedCount: number;
+  rankingChanges: {
+    rising: number;
+    falling: number;
+    unchanged: number;
+  };
+  trafficChanges: {
+    clicks: number;
+    clicksChangePct: number;
+    impressions: number;
+    impressionsChangePct: number;
+    avgPosition: number;
+    avgPositionChange: number;
+    ctr: number;
+  };
+  newOpportunities: Array<{
+    id: string;
+    title: string;
+    category: string;
+    potentialLift: string;
+    confidence: number;
+    priority: 'CRITICAL' | 'HIGH' | 'MEDIUM';
+    actionType: string;
+  }>;
+  recommendedPriorities: Array<{
+    id: string;
+    title: string;
+    pillar: string;
+    impact: string;
+    confidence: number;
+    risk: 'LOW' | 'MEDIUM' | 'HIGH';
+    targetUrl: string;
+    reason: string;
+  }>;
+}
+
+export interface OnboardingState {
+  currentStep: number;
+  domain: string;
+  name: string;
+  industry: string;
+  sitemapUrl: string;
+  cmsType: 'WORDPRESS' | 'SHOPIFY' | 'HEADLESS' | 'CUSTOM' | 'NONE';
+  gscConnected: boolean;
+  ga4Connected: boolean;
+  auditProgress: number;
+  strategyGenerated: boolean;
+}

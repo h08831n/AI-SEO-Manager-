@@ -16,21 +16,28 @@ import {
   Server,
   Layers,
   FileCheck,
+  Cpu,
+  Shield,
+  Sliders,
+  Users,
 } from 'lucide-react';
 
 export type SaaSTabId =
   | 'dashboard'
-  | 'projects'
-  | 'health'
-  | 'recommendations'
+  | 'agents'
+  | 'decisions'
   | 'actions'
-  | 'keywords'
   | 'analytics'
+  | 'health'
+  | 'keywords'
   | 'competitors'
+  | 'projects'
   | 'integrations'
+  | 'autonomy'
   | 'copilot'
   | 'settings'
-  | 'billing';
+  | 'billing'
+  | 'recommendations'; // alias for backward-compat
 
 interface SidebarProps {
   currentTab: SaaSTabId;
@@ -53,29 +60,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const navSections = [
     {
-      title: 'CORE ENGINE',
+      title: 'AI SEO TEAM',
       items: [
-        { id: 'dashboard' as SaaSTabId, label: 'Dashboard', icon: LayoutDashboard, shortcut: 'D' },
-        { id: 'projects' as SaaSTabId, label: 'Projects & Sites', icon: Globe, badge: 'Active' },
-        { id: 'health' as SaaSTabId, label: 'SEO Health (17 Pillars)', icon: Activity, badge: `${seoScore}%` },
-        { id: 'recommendations' as SaaSTabId, label: 'AI Recommendations', icon: Sparkles, badge: recommendationsCount > 0 ? String(recommendationsCount) : undefined, badgeColor: 'bg-indigo-500/20 text-indigo-300' },
-        { id: 'actions' as SaaSTabId, label: 'Action Timeline', icon: Zap, badge: activeActionsCount > 0 ? String(activeActionsCount) : undefined, badgeColor: 'bg-emerald-500/20 text-emerald-300' },
+        { id: 'dashboard' as SaaSTabId, label: 'Command Center', icon: LayoutDashboard, badge: 'Daily Brief', badgeColor: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' },
+        { id: 'agents' as SaaSTabId, label: 'SEO Agents Swarm', icon: Users, badge: '6 Active', badgeColor: 'bg-cyan-500/20 text-cyan-300' },
+        { id: 'decisions' as SaaSTabId, label: 'Decisions Review', icon: Sparkles, badge: recommendationsCount > 0 ? String(recommendationsCount) : undefined, badgeColor: 'bg-indigo-500/20 text-indigo-300' },
+        { id: 'actions' as SaaSTabId, label: 'Actions & Verification', icon: Zap, badge: activeActionsCount > 0 ? String(activeActionsCount) : undefined, badgeColor: 'bg-emerald-500/20 text-emerald-300' },
+        { id: 'analytics' as SaaSTabId, label: 'Insights & Attribution', icon: BarChart3 },
       ],
     },
     {
-      title: 'INTELLIGENCE & SERP',
+      title: 'SEO INTELLIGENCE',
       items: [
-        { id: 'keywords' as SaaSTabId, label: 'Keywords Universe', icon: TrendingUp },
-        { id: 'analytics' as SaaSTabId, label: 'Analytics & GSC/GA4', icon: BarChart3 },
+        { id: 'health' as SaaSTabId, label: '17-Pillar Health Score', icon: Activity, badge: `${seoScore}%` },
+        { id: 'keywords' as SaaSTabId, label: 'Keywords & SERP', icon: TrendingUp },
         { id: 'competitors' as SaaSTabId, label: 'Competitor Gaps', icon: ShieldAlert },
       ],
     },
     {
-      title: 'AUTONOMOUS PLATFORM',
+      title: 'PLATFORM & SAFETY',
       items: [
-        { id: 'integrations' as SaaSTabId, label: 'Integrations', icon: Boxes },
+        { id: 'projects' as SaaSTabId, label: 'Websites & Setup', icon: Globe },
+        { id: 'integrations' as SaaSTabId, label: 'CMS & Integrations', icon: Boxes },
+        { id: 'autonomy' as SaaSTabId, label: 'Autonomy & Safety', icon: Sliders, badge: 'Supervised', badgeColor: 'bg-emerald-500/10 text-emerald-400' },
         { id: 'copilot' as SaaSTabId, label: 'AI SEO Copilot', icon: Bot, badge: 'Live AI', badgeColor: 'bg-cyan-500/20 text-cyan-300' },
-        { id: 'settings' as SaaSTabId, label: 'Settings & Safety', icon: Settings },
+        { id: 'settings' as SaaSTabId, label: 'Settings', icon: Settings },
         { id: 'billing' as SaaSTabId, label: 'Billing & Plan', icon: CreditCard, badge: 'Enterprise' },
       ],
     },
@@ -98,13 +107,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 v3.2
               </span>
             </div>
-            <p className="text-[11px] text-slate-500">Autonomous SEO Platform</p>
+            <p className="text-[11px] text-slate-500">Autonomous Virtual Team</p>
           </div>
         </div>
       </div>
 
       {/* Navigation Sections */}
-      <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6 scrollbar-thin">
+      <div className="flex-1 overflow-y-auto px-3 py-4 space-y-5 scrollbar-thin">
         {navSections.map((section, idx) => (
           <div key={idx} className="space-y-1">
             <div className="px-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 font-mono">
@@ -113,7 +122,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
             {section.items.map((item) => {
               const Icon = item.icon;
-              const isActive = currentTab === item.id;
+              const isActive =
+                currentTab === item.id ||
+                (item.id === 'decisions' && currentTab === 'recommendations');
 
               return (
                 <button
@@ -159,7 +170,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="flex items-center space-x-2">
             <div className={`w-2 h-2 rounded-full ${isAllSystemsUp ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
             <span className="text-slate-300 font-medium font-mono">
-              {isAllSystemsUp ? 'Engine Operational' : 'Engine Degradation'}
+              {isAllSystemsUp ? 'Autonomous Swarm Active' : 'Swarm Degradation'}
             </span>
           </div>
           <span className="text-[10px] text-slate-500 font-mono">24/7 Loop</span>
