@@ -5,505 +5,85 @@ import {
   CmsOperationResult,
   CmsConnectionConfig,
 } from './cmsActionProviderInterface';
+import { WordPressSimulationProvider } from './wordPressSimulationProvider';
+import { WordPressProductionProvider } from './wordPressProductionProvider';
 import { isProductionMode } from '../../../config/runtimeMode';
-import { SafeUrlPolicy, SafeMutationHttpClient } from '../../../security/safeUrlPolicy';
 
 export class WordPressCmsProvider implements ICmsActionProvider {
   readonly platform: CmsPlatformType = 'WORDPRESS';
   readonly mode: CmsProviderMode;
-  private config?: CmsConnectionConfig;
-
-  // In-memory backing store for sandbox / simulation
-  private deployedCanonicals: Map<string, string> = new Map();
-  private deployedMeta: Map<string, { title?: string; description?: string; robotsMeta?: string }> = new Map();
-  private deployedSchemas: Map<string, Record<string, any>[]> = new Map();
-  private deployedRedirects: Map<string, { destinationUrl: string; statusCode: number }> = new Map();
-  private deployedLinks: Map<string, Array<{ targetUrl: string; anchorText: string }>> = new Map();
+  private delegate: ICmsActionProvider;
 
   constructor(mode?: CmsProviderMode, config?: CmsConnectionConfig) {
     this.mode = mode || (isProductionMode() ? 'PRODUCTION' : 'SIMULATION');
-    this.config = config;
-  }
-
-  private getAuthHeader(config?: CmsConnectionConfig): string | null {
-    const activeConfig = config || this.config;
-    if (!activeConfig) return null;
-
-    if (activeConfig.accessToken) {
-      return `Bearer ${activeConfig.accessToken}`;
-    }
-    if (activeConfig.username && activeConfig.applicationPassword) {
-      const creds = Buffer.from(`${activeConfig.username}:${activeConfig.applicationPassword}`).toString('base64');
-      return `Basic ${creds}`;
-    }
-    if (activeConfig.apiKey) {
-      return `Bearer ${activeConfig.apiKey}`;
-    }
-    return null;
-  }
-
-  private extractSlug(url: string): string {
-    try {
-      const parsed = new URL(url);
-      const segments = parsed.pathname.split('/').filter(Boolean);
-      return segments[segments.length - 1] || 'home';
-    } catch {
-      return 'post';
-    }
-  }
-
-  private async findWordPressPostId(targetUrl: string, auth: string): Promise<number | null> {
-    if (!this.config?.endpointUrl) return null;
-    const slug = this.extractSlug(targetUrl);
-    try {
-      const res = await SafeMutationHttpClient.execute({
-        url: `${this.config.endpointUrl}/wp-json/wp/v2/posts?slug=${encodeURIComponent(slug)}`,
-        method: 'GET',
-        headers: { Authorization: auth, 'User-Agent': 'TechScale-SEO-Worker/2.0' },
-        timeoutMs: 5000,
-      });
-
-      if (res.json && Array.isArray(res.json) && res.json.length > 0 && res.json[0].id) {
-        return res.json[0].id;
-      }
-
-      // Try pages
-      const pageRes = await SafeMutationHttpClient.execute({
-        url: `${this.config.endpointUrl}/wp-json/wp/v2/pages?slug=${encodeURIComponent(slug)}`,
-        method: 'GET',
-        headers: { Authorization: auth, 'User-Agent': 'TechScale-SEO-Worker/2.0' },
-        timeoutMs: 5000,
-      });
-
-      if (pageRes.json && Array.isArray(pageRes.json) && pageRes.json.length > 0 && pageRes.json[0].id) {
-        return pageRes.json[0].id;
-      }
-    } catch {
-      // Fallback
-    }
-    return null;
-  }
-
-  async testConnection(websiteId: string, domain: string, config?: CmsConnectionConfig): Promise<{
-    connected: boolean;
-    version?: string;
-    message?: string;
-  }> {
-    const activeConfig = config || this.config;
-    if (activeConfig?.apiKey === 'INVALID_KEY' || activeConfig?.apiKey === 'EXPIRED_CREDENTIALS') {
-      return {
-        connected: false,
-        message: 'WordPress REST API authentication failed: 401 Unauthorized - Invalid Application Password',
-      };
-    }
-    if (activeConfig?.endpointUrl?.includes('invalid-wp-host') || activeConfig?.endpointUrl?.includes('500')) {
-      return {
-        connected: false,
-        message: 'WordPress REST API endpoint unreachable: 500 Internal Server Error',
-      };
-    }
-
-    if (this.mode === 'PRODUCTION' && activeConfig?.endpointUrl) {
-      try {
-        const auth = this.getAuthHeader(activeConfig);
-        const headers: Record<string, string> = { 'User-Agent': 'TechScale-SEO-Worker/1.0' };
-        if (auth) headers['Authorization'] = auth;
-
-        const result = await SafeUrlPolicy.safeFetch(`${activeConfig.endpointUrl}/wp-json/wp/v2`, {
-          timeoutMs: 5000,
-        });
-
-        if (result.statusCode >= 200 && result.statusCode < 300) {
-          return {
-            connected: true,
-            version: 'WordPress REST API v2 Connected',
-            message: `Successfully verified WordPress REST API connection for ${domain}`,
-          };
-        }
-      } catch (err: any) {
-        return {
-          connected: false,
-          message: `WordPress connection failed: ${err.message}`,
-        };
-      }
-    }
-
-    return {
-      connected: true,
-      version: 'WordPress 6.6.1 + Yoast SEO 23.4 / REST API v2',
-      message: `Verified WordPress REST API integration for ${domain}`,
-    };
-  }
-
-  async getCanonicalUrl(targetUrl: string): Promise<string | null> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
-      const auth = this.getAuthHeader();
-      if (auth) {
-        try {
-          const postId = await this.findWordPressPostId(targetUrl, auth);
-          if (postId) {
-            const res = await SafeMutationHttpClient.execute({
-              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
-              method: 'GET',
-              headers: { Authorization: auth },
-              timeoutMs: 5000,
-            });
-            if (res.json?.yoast_head_json?.canonical) {
-              return res.json.yoast_head_json.canonical;
-            }
-            if (res.json?.meta?._yoast_wpseo_canonical) {
-              return res.json.meta._yoast_wpseo_canonical;
-            }
-          }
-        } catch {
-          // Fallback to cache
-        }
-      }
-    }
-    return this.deployedCanonicals.get(targetUrl) || null;
-  }
-
-  async setCanonicalUrl(targetUrl: string, canonicalUrl: string): Promise<CmsOperationResult<{ canonicalUrl: string }>> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-
-      if (this.config?.endpointUrl) {
-        try {
-          const postId = await this.findWordPressPostId(targetUrl, auth);
-          if (postId) {
-            await SafeMutationHttpClient.execute({
-              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
-              method: 'POST',
-              headers: {
-                Authorization: auth,
-                'Content-Type': 'application/json',
-              },
-              body: {
-                meta: {
-                  _yoast_wpseo_canonical: canonicalUrl,
-                },
-              },
-              timeoutMs: 8000,
-            });
-          }
-        } catch (err: any) {
-          // If remote request failed and not a synthetic error, bubble or cache
-          if (err.message.includes('SSRF') || err.message.includes('blocked')) {
-            throw err;
-          }
-        }
-      }
-    }
-
-    this.deployedCanonicals.set(targetUrl, canonicalUrl);
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl,
-      appliedData: { canonicalUrl },
-      message: `[WordPress REST API] Updated post canonical URL to ${canonicalUrl}`,
-      diffSummary: `WP Canonical: -> ${canonicalUrl}`,
-      executedAt: new Date(),
-    };
-  }
-
-  async revertCanonicalUrl(targetUrl: string, previousCanonicalUrl: string | null): Promise<CmsOperationResult<{ canonicalUrl: string | null }>> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-      if (this.config?.endpointUrl) {
-        try {
-          const postId = await this.findWordPressPostId(targetUrl, auth);
-          if (postId) {
-            await SafeMutationHttpClient.execute({
-              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
-              method: 'POST',
-              headers: { Authorization: auth, 'Content-Type': 'application/json' },
-              body: { meta: { _yoast_wpseo_canonical: previousCanonicalUrl || '' } },
-              timeoutMs: 8000,
-            });
-          }
-        } catch {
-          // Cache fallback
-        }
-      }
-    }
-
-    if (previousCanonicalUrl) {
-      this.deployedCanonicals.set(targetUrl, previousCanonicalUrl);
+    if (this.mode === 'PRODUCTION' && config && config.endpointUrl) {
+      this.delegate = new WordPressProductionProvider(config);
     } else {
-      this.deployedCanonicals.delete(targetUrl);
+      this.delegate = new WordPressSimulationProvider(config);
     }
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl,
-      appliedData: { canonicalUrl: previousCanonicalUrl },
-      message: `[WordPress REST API] Reverted canonical tag on ${targetUrl}`,
-      executedAt: new Date(),
-    };
   }
 
-  async getMetaTags(targetUrl: string): Promise<{ title?: string | null; description?: string | null; robotsMeta?: string | null }> {
-    if (this.mode === 'PRODUCTION' && this.config?.endpointUrl) {
-      const auth = this.getAuthHeader();
-      if (auth) {
-        try {
-          const postId = await this.findWordPressPostId(targetUrl, auth);
-          if (postId) {
-            const res = await SafeMutationHttpClient.execute({
-              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
-              method: 'GET',
-              headers: { Authorization: auth },
-              timeoutMs: 5000,
-            });
-            if (res.json) {
-              return {
-                title: res.json.title?.rendered || res.json.meta?._yoast_wpseo_title || null,
-                description: res.json.meta?._yoast_wpseo_metadesc || null,
-                robotsMeta: res.json.meta?._yoast_wpseo_meta_robots_noindex ? 'noindex' : null,
-              };
-            }
-          }
-        } catch {
-          // Fallback
-        }
-      }
-    }
-    const meta = this.deployedMeta.get(targetUrl);
-    return {
-      title: meta?.title || null,
-      description: meta?.description || null,
-      robotsMeta: meta?.robotsMeta || null,
-    };
+  testConnection(websiteId: string, domain: string, config?: CmsConnectionConfig) {
+    return this.delegate.testConnection(websiteId, domain, config);
   }
 
-  async setMetaTags(
-    targetUrl: string,
-    meta: { title?: string; description?: string; robotsMeta?: string }
-  ): Promise<CmsOperationResult<{ title?: string; description?: string; robotsMeta?: string }>> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-
-      if (this.config?.endpointUrl) {
-        try {
-          const postId = await this.findWordPressPostId(targetUrl, auth);
-          if (postId) {
-            await SafeMutationHttpClient.execute({
-              url: `${this.config.endpointUrl}/wp-json/wp/v2/posts/${postId}`,
-              method: 'POST',
-              headers: { Authorization: auth, 'Content-Type': 'application/json' },
-              body: {
-                meta: {
-                  _yoast_wpseo_title: meta.title,
-                  _yoast_wpseo_metadesc: meta.description,
-                  _yoast_wpseo_meta_robots_noindex: meta.robotsMeta?.includes('noindex') ? '1' : '0',
-                },
-              },
-              timeoutMs: 8000,
-            });
-          }
-        } catch (err: any) {
-          if (err.message.includes('SSRF') || err.message.includes('blocked')) {
-            throw err;
-          }
-        }
-      }
-    }
-
-    const current = this.deployedMeta.get(targetUrl) || {};
-    const updated = {
-      title: meta.title !== undefined ? meta.title : current.title,
-      description: meta.description !== undefined ? meta.description : current.description,
-      robotsMeta: meta.robotsMeta !== undefined ? meta.robotsMeta : current.robotsMeta,
-    };
-    this.deployedMeta.set(targetUrl, updated);
-
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl,
-      appliedData: updated,
-      message: `[WordPress Meta/Yoast] Updated SEO title and description for ${targetUrl}`,
-      diffSummary: `WP Title: "${updated.title || ''}" | WP Desc: "${updated.description || ''}"`,
-      executedAt: new Date(),
-    };
+  getCanonicalUrl(targetUrl: string) {
+    return this.delegate.getCanonicalUrl(targetUrl);
   }
 
-  async revertMetaTags(
-    targetUrl: string,
-    previousMeta: { title?: string | null; description?: string | null; robotsMeta?: string | null }
-  ): Promise<CmsOperationResult> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-    }
-
-    if (previousMeta.title || previousMeta.description || previousMeta.robotsMeta) {
-      this.deployedMeta.set(targetUrl, {
-        title: previousMeta.title || undefined,
-        description: previousMeta.description || undefined,
-        robotsMeta: previousMeta.robotsMeta || undefined,
-      });
-    } else {
-      this.deployedMeta.delete(targetUrl);
-    }
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl,
-      appliedData: previousMeta,
-      message: `[WordPress Meta/Yoast] Reverted SEO metadata on ${targetUrl}`,
-      executedAt: new Date(),
-    };
+  setCanonicalUrl(targetUrl: string, canonicalUrl: string) {
+    return this.delegate.setCanonicalUrl(targetUrl, canonicalUrl);
   }
 
-  async getStructuredData(targetUrl: string): Promise<Record<string, any>[]> {
-    return this.deployedSchemas.get(targetUrl) || [];
+  revertCanonicalUrl(targetUrl: string, previousCanonicalUrl: string | null) {
+    return this.delegate.revertCanonicalUrl(targetUrl, previousCanonicalUrl);
   }
 
-  async injectStructuredData(
-    targetUrl: string,
-    schema: Record<string, any>
-  ): Promise<CmsOperationResult<{ schema: Record<string, any> }>> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-    }
-
-    const schemas = this.deployedSchemas.get(targetUrl) || [];
-    schemas.push(schema);
-    this.deployedSchemas.set(targetUrl, schemas);
-
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl,
-      appliedData: { schema },
-      message: `[WordPress Schema] Injected JSON-LD structured data into header on ${targetUrl}`,
-      diffSummary: `WP Schema: +${schema['@type'] || 'CustomSchema'}`,
-      executedAt: new Date(),
-    };
+  getMetaTags(targetUrl: string) {
+    return this.delegate.getMetaTags(targetUrl);
   }
 
-  async revertStructuredData(
-    targetUrl: string,
-    previousSchemas: Record<string, any>[]
-  ): Promise<CmsOperationResult<{ schemas: Record<string, any>[] }>> {
-    this.deployedSchemas.set(targetUrl, previousSchemas);
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl,
-      appliedData: { schemas: previousSchemas },
-      message: `[WordPress Schema] Reverted structured data schemas on ${targetUrl}`,
-      executedAt: new Date(),
-    };
+  setMetaTags(targetUrl: string, meta: { title?: string; description?: string; robotsMeta?: string }) {
+    return this.delegate.setMetaTags(targetUrl, meta);
   }
 
-  async getRedirectRule(sourceUrl: string): Promise<{ destinationUrl: string; statusCode: number } | null> {
-    return this.deployedRedirects.get(sourceUrl) || null;
+  revertMetaTags(targetUrl: string, previousMeta: { title?: string | null; description?: string | null; robotsMeta?: string | null }) {
+    return this.delegate.revertMetaTags(targetUrl, previousMeta);
   }
 
-  async createRedirectRule(
-    sourceUrl: string,
-    destinationUrl: string,
-    statusCode: number = 301
-  ): Promise<CmsOperationResult<{ sourceUrl: string; destinationUrl: string; statusCode: number }>> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-    }
-
-    this.deployedRedirects.set(sourceUrl, { destinationUrl, statusCode });
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl: sourceUrl,
-      appliedData: { sourceUrl, destinationUrl, statusCode },
-      message: `[WordPress Redirection Plugin] Created ${statusCode} redirect from ${sourceUrl} to ${destinationUrl}`,
-      diffSummary: `WP 301 Redirect: ${sourceUrl} -> ${destinationUrl}`,
-      executedAt: new Date(),
-    };
+  getStructuredData(targetUrl: string) {
+    return this.delegate.getStructuredData(targetUrl);
   }
 
-  async revertRedirectRule(
-    sourceUrl: string,
-    previousRule: { destinationUrl: string; statusCode: number } | null
-  ): Promise<CmsOperationResult> {
-    if (previousRule) {
-      this.deployedRedirects.set(sourceUrl, previousRule);
-    } else {
-      this.deployedRedirects.delete(sourceUrl);
-    }
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl: sourceUrl,
-      appliedData: previousRule,
-      message: `[WordPress Redirection Plugin] Reverted redirect rule for ${sourceUrl}`,
-      executedAt: new Date(),
-    };
+  injectStructuredData(targetUrl: string, schema: Record<string, any>) {
+    return this.delegate.injectStructuredData(targetUrl, schema);
   }
 
-  async getInternalLinks(sourceUrl: string): Promise<Array<{ targetUrl: string; anchorText: string }>> {
-    return this.deployedLinks.get(sourceUrl) || [];
+  revertStructuredData(targetUrl: string, previousSchemas: Record<string, any>[]) {
+    return this.delegate.revertStructuredData(targetUrl, previousSchemas);
   }
 
-  async injectInternalLink(
-    sourceUrl: string,
-    targetUrl: string,
-    anchorText: string
-  ): Promise<CmsOperationResult<{ sourceUrl: string; targetUrl: string; anchorText: string }>> {
-    if (this.mode === 'PRODUCTION') {
-      const auth = this.getAuthHeader();
-      if (!auth) {
-        throw new Error('WORDPRESS_AUTH_REQUIRED: Production WordPress provider requires valid credentials.');
-      }
-    }
-
-    const links = this.deployedLinks.get(sourceUrl) || [];
-    links.push({ targetUrl, anchorText });
-    this.deployedLinks.set(sourceUrl, links);
-
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl: sourceUrl,
-      appliedData: { sourceUrl, targetUrl, anchorText },
-      message: `[WordPress Post Content] Injected internal contextual hyperlink to ${targetUrl}`,
-      diffSummary: `WP Link: [${anchorText}](${targetUrl})`,
-      executedAt: new Date(),
-    };
+  getRedirectRule(sourceUrl: string) {
+    return this.delegate.getRedirectRule(sourceUrl);
   }
 
-  async revertInternalLinks(
-    sourceUrl: string,
-    previousLinks: Array<{ targetUrl: string; anchorText: string }>
-  ): Promise<CmsOperationResult> {
-    this.deployedLinks.set(sourceUrl, previousLinks);
-    return {
-      success: true,
-      provider: this.platform,
-      targetUrl: sourceUrl,
-      appliedData: { previousLinks },
-      message: `[WordPress Post Content] Reverted internal hyperlinks on ${sourceUrl}`,
-      executedAt: new Date(),
-    };
+  createRedirectRule(sourceUrl: string, destinationUrl: string, statusCode?: number) {
+    return this.delegate.createRedirectRule(sourceUrl, destinationUrl, statusCode);
+  }
+
+  revertRedirectRule(sourceUrl: string, previousRule: { destinationUrl: string; statusCode: number } | null) {
+    return this.delegate.revertRedirectRule(sourceUrl, previousRule);
+  }
+
+  getInternalLinks(sourceUrl: string) {
+    return this.delegate.getInternalLinks(sourceUrl);
+  }
+
+  injectInternalLink(sourceUrl: string, targetUrl: string, anchorText: string) {
+    return this.delegate.injectInternalLink(sourceUrl, targetUrl, anchorText);
+  }
+
+  revertInternalLinks(sourceUrl: string, previousLinks: Array<{ targetUrl: string; anchorText: string }>) {
+    return this.delegate.revertInternalLinks(sourceUrl, previousLinks);
   }
 }
-

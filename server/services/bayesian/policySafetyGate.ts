@@ -146,8 +146,8 @@ export class PolicySafetyGate {
     const shouldDamp = meetsLossDamp || meetsWinRateDamp;
 
     if (shouldDamp) {
-      const dampedWeight = Math.min(DAMPED_WEIGHT_CEILING, rawCalculatedWeight, currentAppliedWeight);
-      const boundedDampedWeight = Math.max(MIN_RULE_WEIGHT, Number(dampedWeight.toFixed(3)));
+      const targetDamped = Math.min(DAMPED_WEIGHT_CEILING, rawCalculatedWeight, currentAppliedWeight);
+      const boundedDampedWeight = Math.max(MIN_RULE_WEIGHT, Number(targetDamped.toFixed(3)));
       const dampReason = meetsLossDamp
         ? `Observed ${observedLosses} losses (win rate ${(posteriorWinRate * 100).toFixed(1)}%) exceeds loss threshold`
         : `Posterior win rate ${(posteriorWinRate * 100).toFixed(1)}% below threshold ${(AUTO_DAMP_WIN_RATE_THRESHOLD * 100).toFixed(1)}%`;

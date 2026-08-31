@@ -6,7 +6,9 @@ export type ApprovalState =
   | 'EXECUTING'
   | 'VERIFYING'
   | 'VERIFIED'
-  | 'ROLLED_BACK';
+  | 'ROLLED_BACK'
+  | 'EXPIRED'
+  | 'REVOKED';
 
 export interface ProposedActionItem {
   id: string;
@@ -15,8 +17,10 @@ export interface ProposedActionItem {
   targetUrl: string;
   ruleKey?: string;
   payload: Record<string, any>;
+  payloadHash?: string;
   opportunityScore: number;
   riskLevel: 'LEVEL_0_SUGGESTION_ONLY' | 'LEVEL_1_SAFE_AUTOMATION' | 'LEVEL_2_REVIEW_REQUIRED' | 'LEVEL_3_HIGH_RISK_MANUAL';
+  riskTier?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
   state: ApprovalState;
   proposedBy: string;
   approvedBy?: string;
@@ -24,6 +28,11 @@ export interface ProposedActionItem {
   rejectionReason?: string;
   approvalNotes?: string;
   executionId?: string;
+  recommendationId?: string;
+  taskId?: string;
+  expiresAt?: Date;
+  consumedAt?: Date;
+  revokedAt?: Date;
   verificationStage?: string;
   proposedAt: Date;
   updatedAt: Date;

@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 import { getRedisConnection } from '../config/redis';
 import { prisma } from '../db/prisma';
 import { OutboxDispatcher } from '../services/outbox/outboxDispatcher';
+import { isProductionMode } from '../config/runtimeMode';
 
 export interface AttributionJobData {
   jobType: 'EVALUATE_ATTRIBUTION' | 'BATCH_EVALUATE_MATURE_EXECUTIONS';
@@ -80,7 +81,16 @@ export class AttributionQueueProducer {
       },
     });
 
-    if (queue) {
+    if (isProductionMode()) {
+      if (!queue) {
+        throw new Error('QUEUE_UNAVAILABLE: Redis queue is required in production mode, but REDIS_URL is not configured.');
+      }
+      try {
+        await queue.add(data.jobType, data, { jobId });
+      } catch (err: any) {
+        throw new Error(`QUEUE_ENQUEUE_FAILED: Failed to enqueue attribution job to Redis: ${err.message}`);
+      }
+    } else if (queue) {
       await queue.add(data.jobType, data, { jobId });
     }
 

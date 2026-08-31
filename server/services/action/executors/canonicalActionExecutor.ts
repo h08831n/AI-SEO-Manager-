@@ -72,7 +72,7 @@ export class CanonicalActionExecutor implements IActionExecutor<CanonicalPayload
 
   public static getDeployedCanonical(url: string, platform?: string): string | undefined {
     const cms = CmsProviderRegistry.getProvider(platform);
-    // Since getCanonicalUrl is async, we read from memory map directly or sync bridge
-    return (cms as any).deployedCanonicals?.get(url);
+    const store = (cms as any).deployedCanonicals || (cms as any).delegate?.deployedCanonicals;
+    return store?.get(url);
   }
 }

@@ -11,6 +11,7 @@ export interface SafeFetchOptions {
   maxResponseBytes?: number;
   allowedContentTypes?: string[];
   userAgent?: string;
+  headers?: Record<string, string>;
 }
 
 export interface RedirectHopRecord {
@@ -262,6 +263,7 @@ export class SafeUrlPolicy {
             Accept: allowedContentTypes.join(', '),
             'Accept-Language': 'en-US,en;q=0.5',
             Host: parsed.host,
+            ...(options.headers || {}),
           },
           signal: controller.signal,
           redirect: 'manual',

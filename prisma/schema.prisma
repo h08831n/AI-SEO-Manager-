@@ -159,6 +159,9 @@ model Website {
   sitemapUrl       String?
   defaultLanguage  String              @default("en-US")
   industry         String?
+  autonomyCircuitBroken   Boolean      @default(false)
+  circuitBreakerReason    String?
+  circuitBreakerTrippedAt DateTime?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
 
@@ -889,6 +892,8 @@ model ActionExecution {
   executedAt          DateTime?
   verifiedAt          DateTime?
   rollbackExecutionId String?
+  attributionMaturityAt DateTime?
+  eligibleAt          DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
 
@@ -963,14 +968,21 @@ model ActionApprovalRequest {
   targetUrl         String
   ruleKey           String?
   payloadJson       String
+  payloadHash       String                      @default("")
   opportunityScore  Float                       @default(0.0)
   riskLevel         String                      @default("LEVEL_1_SAFE_AUTOMATION")
+  riskTier          String                      @default("LOW")
   state             String                      @default("PROPOSED")
   proposedBy        String                      @default("DECISION_ENGINE")
   approvedBy        String?
   approvalNotes     String?
   rejectionReason   String?
   actionExecutionId String?
+  recommendationId  String?
+  taskId            String?
+  expiresAt         DateTime?
+  consumedAt        DateTime?
+  revokedAt         DateTime?
   createdAt         DateTime                    @default(now())
   updatedAt         DateTime                    @updatedAt
 

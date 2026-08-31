@@ -25,17 +25,19 @@ export class SyntheticHttpFetcher {
     if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
       try {
         const liveObs = await ProductionHttpVerifier.verifyLiveUrl(targetUrl);
-        return {
-          httpStatus: liveObs.httpStatus,
-          headers: liveObs.headers,
-          canonicalUrl: liveObs.canonicalUrl,
-          title: liveObs.title,
-          description: liveObs.description,
-          robotsMeta: liveObs.robotsMeta,
-          schemas: liveObs.schemas,
-          links: liveObs.links,
-          locationHeader: liveObs.locationHeader,
-        };
+        if (liveObs && liveObs.httpStatus >= 200 && liveObs.httpStatus < 400 && (liveObs.canonicalUrl || liveObs.title || liveObs.description)) {
+          return {
+            httpStatus: liveObs.httpStatus,
+            headers: liveObs.headers,
+            canonicalUrl: liveObs.canonicalUrl,
+            title: liveObs.title,
+            description: liveObs.description,
+            robotsMeta: liveObs.robotsMeta,
+            schemas: liveObs.schemas,
+            links: liveObs.links,
+            locationHeader: liveObs.locationHeader,
+          };
+        }
       } catch (err: any) {
         if (isProductionMode()) {
           // In production, live verification failure should fail closed

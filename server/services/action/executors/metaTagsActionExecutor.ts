@@ -81,6 +81,7 @@ export class MetaTagsActionExecutor implements IActionExecutor<MetaTagsPayload, 
 
   public static getDeployedMeta(url: string, platform?: string) {
     const cms = CmsProviderRegistry.getProvider(platform);
-    return (cms as any).deployedMeta?.get(url);
+    const store = (cms as any).deployedMeta || (cms as any).delegate?.deployedMeta;
+    return store?.get(url);
   }
 }

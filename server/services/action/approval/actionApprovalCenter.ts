@@ -5,14 +5,16 @@ import { prisma } from '../../../db/prisma';
 export class ActionApprovalCenter {
   // Valid State Machine Transitions
   private static ALLOWED_TRANSITIONS: Record<ApprovalState, ApprovalState[]> = {
-    PROPOSED: ['APPROVED', 'REJECTED'],
-    APPROVED: ['QUEUED', 'EXECUTING', 'REJECTED'],
+    PROPOSED: ['APPROVED', 'REJECTED', 'EXPIRED', 'REVOKED'],
+    APPROVED: ['QUEUED', 'EXECUTING', 'REJECTED', 'EXPIRED', 'REVOKED'],
     REJECTED: ['PROPOSED'], // Can be re-proposed if reworked
-    QUEUED: ['EXECUTING', 'REJECTED'],
-    EXECUTING: ['VERIFYING', 'ROLLED_BACK'],
+    QUEUED: ['EXECUTING', 'REJECTED', 'REVOKED'],
+    EXECUTING: ['VERIFYING', 'VERIFIED', 'ROLLED_BACK'],
     VERIFYING: ['VERIFIED', 'ROLLED_BACK'],
     VERIFIED: ['ROLLED_BACK'], // 1-click rollback after verification
     ROLLED_BACK: ['PROPOSED'],
+    EXPIRED: ['PROPOSED'],
+    REVOKED: ['PROPOSED'],
   };
 
   /**
@@ -51,14 +53,21 @@ export class ActionApprovalCenter {
       targetUrl: rec.targetUrl,
       ruleKey: rec.ruleKey || undefined,
       payload,
+      payloadHash: rec.payloadHash || undefined,
       opportunityScore: rec.opportunityScore,
       riskLevel: rec.riskLevel as any,
+      riskTier: rec.riskTier as any,
       state: rec.state as ApprovalState,
       proposedBy: rec.proposedBy,
       approvedBy: rec.approvedBy || undefined,
       approvalNotes: rec.approvalNotes || undefined,
       rejectionReason: rec.rejectionReason || undefined,
       executionId: rec.actionExecutionId || undefined,
+      recommendationId: rec.recommendationId || undefined,
+      taskId: rec.taskId || undefined,
+      expiresAt: rec.expiresAt || undefined,
+      consumedAt: rec.consumedAt || undefined,
+      revokedAt: rec.revokedAt || undefined,
       proposedAt: rec.createdAt,
       updatedAt: rec.updatedAt,
     };
@@ -86,12 +95,7 @@ export class ActionApprovalCenter {
     targetState: ApprovalState;
     actorId: string;
     reasonOrNotes?: string;
-    updateFields?: {
-      approvedBy?: string;
-      approvalNotes?: string;
-      rejectionReason?: string;
-      actionExecutionId?: string;
-    };
+    updateFields?: Record<string, any>;
   }): Promise<ProposedActionItem> {
     const { actionId, targetState, actorId, reasonOrNotes, updateFields = {} } = params;
 
@@ -177,7 +181,11 @@ export class ActionApprovalCenter {
     payload: Record<string, any>;
     opportunityScore?: number;
     riskLevel?: 'LEVEL_0_SUGGESTION_ONLY' | 'LEVEL_1_SAFE_AUTOMATION' | 'LEVEL_2_REVIEW_REQUIRED' | 'LEVEL_3_HIGH_RISK_MANUAL';
+    riskTier?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
     proposedBy?: string;
+    recommendationId?: string;
+    taskId?: string;
+    expiresInDays?: number;
   }): Promise<ProposedActionItem> {
     const {
       websiteId,
@@ -187,12 +195,18 @@ export class ActionApprovalCenter {
       payload,
       opportunityScore = 75,
       riskLevel = 'LEVEL_2_REVIEW_REQUIRED',
+      riskTier = 'MEDIUM',
       proposedBy = 'SYSTEM_DIAGNOSIS_ENGINE',
+      recommendationId,
+      taskId,
+      expiresInDays = 7,
     } = params;
 
     const actionId = `prop-act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const payloadJson = JSON.stringify(payload);
+    const payloadHash = this.computePayloadHash(payload);
     const now = new Date();
+    const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
 
     // Persist to ActionApprovalRequest table
     const dbRecord = await prisma.actionApprovalRequest.create({
@@ -203,10 +217,15 @@ export class ActionApprovalCenter {
         targetUrl,
         ruleKey,
         payloadJson,
+        payloadHash,
         opportunityScore,
         riskLevel,
+        riskTier,
         state: 'PROPOSED',
         proposedBy,
+        recommendationId,
+        taskId,
+        expiresAt,
         createdAt: now,
         updatedAt: now,
       },
@@ -269,6 +288,26 @@ export class ActionApprovalCenter {
   }
 
   /**
+   * Revokes an existing approval intent.
+   */
+  public static async revokeAction(params: {
+    actionId: string;
+    userId: string;
+    reason?: string;
+  }): Promise<ProposedActionItem> {
+    const { actionId, userId, reason } = params;
+    return await this.executeAtomicTransition({
+      actionId,
+      targetState: 'REVOKED',
+      actorId: userId,
+      reasonOrNotes: reason || 'Approval intent revoked',
+      updateFields: {
+        revokedAt: new Date(),
+      },
+    });
+  }
+
+  /**
    * Transitions action to QUEUED state for execution dispatcher.
    */
   public static async queueAction(actionId: string, userId: string = 'SYSTEM'): Promise<ProposedActionItem> {
@@ -280,7 +319,7 @@ export class ActionApprovalCenter {
   }
 
   /**
-   * Transitions action to EXECUTING state.
+   * Transitions action to EXECUTING state and records consumed timestamp.
    */
   public static async markExecuting(
     actionId: string,
@@ -293,6 +332,7 @@ export class ActionApprovalCenter {
       actorId: userId,
       updateFields: {
         actionExecutionId: executionId,
+        consumedAt: new Date(),
       },
     });
   }

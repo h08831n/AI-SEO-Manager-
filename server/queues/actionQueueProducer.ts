@@ -1,6 +1,7 @@
 import { Queue } from 'bullmq';
 import { getRedisConnection } from '../config/redis';
 import { prisma } from '../db/prisma';
+import { isProductionMode } from '../config/runtimeMode';
 
 export interface ActionJobData {
   jobType: 'EXECUTE_ACTION' | 'ROLLBACK_ACTION' | 'VERIFY_ACTION' | 'EVALUATE_DECISIONS';
@@ -78,11 +79,20 @@ export class ActionQueueProducer {
       },
     });
 
-    if (process.env.NODE_ENV !== 'test' && process.env.REDIS_URL) {
+    if (isProductionMode()) {
+      if (!queue) {
+        throw new Error('QUEUE_UNAVAILABLE: Redis queue is required in production mode, but REDIS_URL is not configured.');
+      }
+      try {
+        await queue.add(data.jobType, data, { jobId });
+      } catch (err: any) {
+        throw new Error(`QUEUE_ENQUEUE_FAILED: Failed to enqueue action job to Redis: ${err.message}`);
+      }
+    } else if (process.env.NODE_ENV !== 'test' && process.env.REDIS_URL && queue) {
       try {
         await queue.add(data.jobType, data, { jobId });
       } catch {
-        // In-memory fallback
+        // In-memory fallback for development
       }
     }
 

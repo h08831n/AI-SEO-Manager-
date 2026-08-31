@@ -105,43 +105,46 @@ export class ProductionAuthenticationProvider implements IAuthenticationProvider
       }
     }
 
+    // In production, only cryptographic tokens (JWTs or hashed API keys) are permitted.
+    // Plaintext email or user ID bypasses are strictly disallowed.
     const prisma = getPrismaClient();
     if (!prisma) {
       return null;
     }
 
     try {
-      // 2. Lookup user in database
-      const user = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { id: token },
-            { email: token },
-          ],
-        },
+      // 2. Lookup API Key by SHA-256 hash if applicable
+      const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+      const apiKeyRecord = await (prisma as any).apiKey?.findUnique?.({
+        where: { keyHash: hashedToken },
         include: {
-          memberships: {
-            include: { workspace: true },
+          user: {
+            include: {
+              memberships: {
+                include: { workspace: true },
+              },
+            },
           },
         },
       });
 
-      if (!user) {
-        return null;
+      if (apiKeyRecord && apiKeyRecord.user) {
+        const user = apiKeyRecord.user;
+        return {
+          userId: user.id,
+          email: user.email,
+          isSystemAdmin: user.memberships.some(
+            (m: any) => m.role === 'ADMIN' || m.role === 'OWNER'
+          ),
+          workspaceMemberships: user.memberships.map((m: any) => ({
+            workspaceId: m.workspaceId,
+            role: m.role,
+          })),
+        };
       }
 
-      return {
-        userId: user.id,
-        email: user.email,
-        isSystemAdmin: user.memberships.some(
-          (m) => m.role === 'ADMIN' || m.role === 'OWNER'
-        ),
-        workspaceMemberships: user.memberships.map((m) => ({
-          workspaceId: m.workspaceId,
-          role: m.role,
-        })),
-      };
-    } catch (err) {
+      return null;
+    } catch {
       return null;
     }
   }

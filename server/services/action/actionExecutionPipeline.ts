@@ -4,12 +4,16 @@
  * Central, deterministic pipeline governing all SEO mutations.
  * Enforces:
  * - Tenancy validation
+ * - Autonomy circuit breaker checks
  * - Risk classification (LOW, MEDIUM, HIGH, CRITICAL)
  * - Autonomy safety gate & Global Autonomy Killswitch
+ * - Durable Intent Binding & strict approval verification
  * - Pre-state snapshotting
- * - Execution through ICmsActionProvider / ActionExecutorRouter
+ * - Execution through authoritative website-scoped ICmsActionProvider
+ * - Provider mode enforcement (fail-closed if non-production provider in production)
  * - Independent verification (Stage 1 Synthetic & DOM check)
- * - Automatic deterministic rollback upon verification failure
+ * - Automatic deterministic rollback upon verification failure with rollback verification
+ * - Fail-closed circuit breaker trip on failed rollback
  * - Outbox events & immutable audit logging
  */
 
@@ -24,6 +28,8 @@ import { OutboxDispatcher } from '../outbox/outboxDispatcher';
 import { ActionApprovalCenter } from './approval/actionApprovalCenter';
 import { LearningLoopEngine } from '../decision/learningLoopEngine';
 import { AttributionQueueProducer } from '../../queues/attributionQueueProducer';
+import { CmsProviderRegistry } from './cms/cmsProviderRegistry';
+import { isProductionMode } from '../../config/runtimeMode';
 
 export type ActionExecutionMode = 'MANUAL' | 'AUTONOMOUS' | 'CANARY';
 export type ActionRiskTier = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -66,6 +72,31 @@ export interface ActionExecutionPipelineResult {
 
 export class ActionExecutionPipeline {
   /**
+   * Trips the autonomy circuit breaker for a website upon safety or rollback failure.
+   */
+  public static async tripCircuitBreaker(websiteId: string, reason: string): Promise<void> {
+    await prisma.website.update({
+      where: { id: websiteId },
+      data: {
+        autonomyCircuitBroken: true,
+        circuitBreakerReason: reason,
+        circuitBreakerTrippedAt: new Date(),
+      },
+    });
+
+    await AuditLogRepository.log({
+      websiteId,
+      actionName: 'AUTONOMY_CIRCUIT_BREAKER_TRIPPED',
+      affectedUrl: 'SITEWIDE',
+      triggeredBy: 'SAFETY_SYSTEM',
+      reason,
+      isReversible: true,
+      isReverted: false,
+      correlationId: `circuit-breaker-${Date.now()}`,
+    });
+  }
+
+  /**
    * Classifies action risk tier deterministically.
    */
   public static classifyRisk(actionType: string, payload: Record<string, any>): ActionRiskTier {
@@ -102,6 +133,7 @@ export class ActionExecutionPipeline {
       websiteId,
       taskId,
       recommendationId,
+      approvalRequestId,
       actionType,
       targetUrl,
       payload,
@@ -121,14 +153,19 @@ export class ActionExecutionPipeline {
       throw new Error(`TENANCY_VIOLATION: Website '${websiteId}' does not exist or access is unauthorized.`);
     }
 
+    // Check autonomy circuit breaker
+    const isAutonomous = executionMode === 'AUTONOMOUS' || executionMode === 'CANARY';
+    if (isAutonomous && website.autonomyCircuitBroken) {
+      throw new Error(
+        `AUTONOMY_CIRCUIT_BROKEN: Autonomous mutations are suspended for website '${websiteId}'. Reason: ${website.circuitBreakerReason || 'Circuit breaker active'}`
+      );
+    }
+
     // 2. Classify Risk
     const riskTier = this.classifyRisk(actionType, payload);
 
     // 3. Global Autonomy Killswitch Verification
-    // CRITICAL: A userId must NEVER bypass the autonomy killswitch if executionMode is AUTONOMOUS
-    const isAutonomous = executionMode === 'AUTONOMOUS' || executionMode === 'CANARY';
     const isAutonomyEnabled = process.env.AUTONOMOUS_EXECUTION_ENABLED === 'true';
-
     if (isAutonomous && !isAutonomyEnabled) {
       throw new Error('AUTONOMY_DISABLED: Global autonomy killswitch is active. Autonomous execution is disabled.');
     }
@@ -179,67 +216,78 @@ export class ActionExecutionPipeline {
       throw new Error(`GOVERNANCE_BLOCKED: ${governance.reason}`);
     }
 
+    // Calculate eligibleAt based on grace period
+    const gracePeriodSeconds = governance.gracePeriodSeconds || 0;
+    const eligibleAt = gracePeriodSeconds > 0 ? new Date(Date.now() + gracePeriodSeconds * 1000) : new Date();
+
     // Enforce grace period for autonomous runs
-    if (!isDryRun && isAutonomous && governance.gracePeriodSeconds && governance.gracePeriodSeconds > 0) {
+    if (!isDryRun && isAutonomous && gracePeriodSeconds > 0) {
       let createdAtTime: number | null = null;
       if (recommendationId) {
         const rec = await prisma.seoRecommendation.findUnique({ where: { id: recommendationId } });
         if (rec) createdAtTime = new Date(rec.createdAt).getTime();
       }
-      if (createdAtTime && (Date.now() - createdAtTime) < (governance.gracePeriodSeconds * 1000)) {
+      if (createdAtTime && (Date.now() - createdAtTime) < (gracePeriodSeconds * 1000)) {
         throw new Error(
-          `GRACE_PERIOD_ACTIVE: Autonomous execution blocked pending ${governance.gracePeriodSeconds}s governance grace period.`
+          `GRACE_PERIOD_ACTIVE: Autonomous execution blocked pending ${gracePeriodSeconds}s governance grace period.`
         );
       }
     }
 
-    // High and Critical risk actions MUST have human approval if running autonomously
-    let boundApprovalId: string | undefined = params.approvalRequestId;
+    // 6. Explicit Approval Requirement for High & Critical Risk
+    let boundApprovalId: string | undefined = approvalRequestId;
     if (!isDryRun && isAutonomous && (riskTier === 'CRITICAL' || riskTier === 'HIGH')) {
       if (!boundApprovalId) {
-        const priorApproval = await prisma.actionApprovalRequest.findFirst({
-          where: {
-            websiteId,
-            targetUrl,
-            actionType,
-            state: { in: ['APPROVED', 'QUEUED'] },
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (!priorApproval) {
-          throw new Error(
-            `APPROVAL_REQUIRED: Action of risk tier ${riskTier} requires explicit human approval before execution.`
-          );
-        }
-
-        boundApprovalId = priorApproval.id;
+        throw new Error(
+          `APPROVAL_REQUIRED: Action of risk tier ${riskTier} requires an explicit approvalRequestId before autonomous execution.`
+        );
       }
     }
 
-    // If bound approval request is present, verify payload hash integrity
+    // 7. Verify Approval Intent Binding if approvalRequestId provided
     if (boundApprovalId) {
       const approvalRec = await prisma.actionApprovalRequest.findUnique({
         where: { id: boundApprovalId },
       });
-      if (approvalRec) {
-        let approvedPayload = {};
-        try {
-          approvedPayload = typeof approvalRec.payloadJson === 'string' ? JSON.parse(approvalRec.payloadJson) : approvalRec.payloadJson;
-        } catch (_) {
-          approvedPayload = {};
-        }
-        const approvedHash = ActionApprovalCenter.computePayloadHash(approvedPayload);
-        const currentHash = ActionApprovalCenter.computePayloadHash(payload);
-        if (approvedHash !== currentHash) {
-          throw new Error(
-            `APPROVAL_INTENT_MISMATCH: Execution payload does not match the approved intent payload (approvedHash=${approvedHash.substring(0, 8)}, currentHash=${currentHash.substring(0, 8)}).`
-          );
-        }
+
+      if (!approvalRec) {
+        throw new Error(`APPROVAL_NOT_FOUND: ActionApprovalRequest with ID '${boundApprovalId}' not found.`);
+      }
+
+      if (approvalRec.websiteId !== websiteId) {
+        throw new Error(`APPROVAL_TENANCY_MISMATCH: Approval request '${boundApprovalId}' does not belong to website '${websiteId}'.`);
+      }
+
+      if (approvalRec.state !== 'APPROVED' && approvalRec.state !== 'QUEUED') {
+        throw new Error(`APPROVAL_STATE_INVALID: Approval request is in state '${approvalRec.state}', must be APPROVED or QUEUED.`);
+      }
+
+      if (approvalRec.expiresAt && new Date(approvalRec.expiresAt) < new Date()) {
+        throw new Error(`APPROVAL_EXPIRED: Approval request expired at ${approvalRec.expiresAt}.`);
+      }
+
+      if (approvalRec.revokedAt) {
+        throw new Error(`APPROVAL_REVOKED: Approval request was revoked at ${approvalRec.revokedAt}.`);
+      }
+
+      let approvedPayload = {};
+      try {
+        approvedPayload = typeof approvalRec.payloadJson === 'string' ? JSON.parse(approvalRec.payloadJson) : approvalRec.payloadJson;
+      } catch (_) {
+        approvedPayload = {};
+      }
+
+      const approvedHash = approvalRec.payloadHash || ActionApprovalCenter.computePayloadHash(approvedPayload);
+      const currentHash = ActionApprovalCenter.computePayloadHash(payload);
+
+      if (approvedHash !== currentHash) {
+        throw new Error(
+          `APPROVAL_INTENT_MISMATCH: Execution payload hash (${currentHash.substring(0, 8)}) does not match approved intent hash (${approvedHash.substring(0, 8)}).`
+        );
       }
     }
 
-    // Validate targetUrl belongs to authorized website domain
+    // 8. Validate Target URL Domain Matching
     if (website.domain) {
       try {
         const targetHost = new URL(targetUrl).hostname.toLowerCase();
@@ -255,7 +303,17 @@ export class ActionExecutionPipeline {
       }
     }
 
-    // 6. Target & Executor Resolution
+    // 9. Resolve Provider & Enforce Provider Mode
+    const runningInProd = isProductionMode();
+    const resolvedProvider = await CmsProviderRegistry.getProviderForWebsite(websiteId);
+
+    if (runningInProd && resolvedProvider.mode !== 'PRODUCTION') {
+      throw new Error(
+        `NON_PRODUCTION_CMS_PROVIDER_BLOCKED: Production execution requires a CMS provider in PRODUCTION mode, but resolved '${resolvedProvider.mode}'. Fail closed.`
+      );
+    }
+
+    // 10. Executor Resolution & Dry-Run Validation
     const target = {
       websiteId,
       targetUrl,
@@ -265,7 +323,6 @@ export class ActionExecutionPipeline {
 
     const executor = ActionExecutorRouter.getExecutor(actionType);
 
-    // 7. Dry-Run Validation
     const validation = await executor.validate(target, payload);
     if (!validation.valid) {
       throw new Error(`VALIDATION_FAILED: ${validation.errors?.join(', ')}`);
@@ -283,7 +340,7 @@ export class ActionExecutionPipeline {
       };
     }
 
-    // 8. Prepare Execution ID and create ActionExecution in PREPARING state (PostgreSQL FK order compliant)
+    // 11. Create ActionExecution in RECOMMENDED state before Pre-State Snapshot (PostgreSQL FK compliance)
     const executionId = `exec-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
     const actionExecution = await prisma.actionExecution.create({
@@ -297,22 +354,21 @@ export class ActionExecutionPipeline {
         idempotencyKey,
         state: ActionStatus.RECOMMENDED,
         requestedByUserId: userId,
+        eligibleAt,
       },
     });
 
-    // 9. Capture Pre-State Snapshot
+    // 12. Capture and Persist Pre-State Snapshot
     const preStateSnapshot = typeof (executor as any).capturePreState === 'function'
       ? await (executor as any).capturePreState(target)
       : (typeof (executor as any).getCurrentState === 'function'
         ? await (executor as any).getCurrentState(target)
         : {});
 
-    // Bind approval request if present
     if (boundApprovalId) {
       await ActionApprovalCenter.markExecuting(boundApprovalId, executionId, userId || 'SYSTEM');
     }
 
-    // Persist durable pre-state snapshot (FK relation to actionExecution is satisfied)
     await ActionSnapshotService.savePreStateSnapshot({
       actionExecutionId: executionId,
       websiteId,
@@ -321,16 +377,17 @@ export class ActionExecutionPipeline {
       preState: preStateSnapshot,
     });
 
-    // 10. Atomically transition ActionExecution to EXECUTING state
+    // 13. Atomically transition ActionExecution to EXECUTING
     await prisma.actionExecution.update({
       where: { id: executionId },
       data: {
         state: ActionStatus.EXECUTING,
         beforeEvidenceJson: JSON.stringify(preStateSnapshot),
+        executedAt: new Date(),
       },
     });
 
-    // 11. Execute Mutation through Authoritative Executor
+    // 14. Execute Mutation
     let execResult: any;
     try {
       execResult = await executor.apply(target, payload, preStateSnapshot);
@@ -358,11 +415,11 @@ export class ActionExecutionPipeline {
       throw new Error(`MUTATION_FAILED: ${execError.message}`);
     }
 
-    // Update with after evidence
+    // 15. Record After Evidence (State stays AWAITING_VERIFICATION if autoVerify=false)
     await prisma.actionExecution.update({
       where: { id: actionExecution.id },
       data: {
-        state: autoVerify ? ActionStatus.AWAITING_VERIFICATION : ActionStatus.VERIFIED_COMPLETED,
+        state: ActionStatus.AWAITING_VERIFICATION,
         afterEvidenceJson: JSON.stringify(execResult.appliedState),
       },
     });
@@ -381,7 +438,7 @@ export class ActionExecutionPipeline {
       correlationId,
     });
 
-    // Outbox Event for Event-Driven Architecture
+    // Outbox Event
     await OutboxDispatcher.recordEvent({
       aggregateType: 'ACTION_EXECUTION',
       aggregateId: actionExecution.id,
@@ -398,7 +455,7 @@ export class ActionExecutionPipeline {
       },
     });
 
-    // 11. Independent Verification (Stage 1 Synthetic & DOM check)
+    // 16. Independent Verification (Stage 1 Synthetic & DOM check)
     let rolledBack = false;
     let verificationResult: any = null;
 
@@ -422,7 +479,34 @@ export class ActionExecutionPipeline {
       // If synthetic verification indicates failure -> AUTOMATIC DETERMINISTIC ROLLBACK
       if (verificationResult.requiresRollback) {
         const rollbackExecutor = ActionExecutorRouter.getExecutor(actionType);
-        await rollbackExecutor.rollback(target, preStateSnapshot);
+        const rollbackRes = await rollbackExecutor.rollback(target, preStateSnapshot);
+
+        // Verify that rollback actually succeeded
+        let rollbackVerified = true;
+        try {
+          const check = await VerificationEngine.runStage1SyntheticVerification({
+            actionExecutionId: actionExecution.id,
+            websiteId,
+            actionType,
+            targetUrl,
+            expectedState: preStateSnapshot,
+            ruleKey,
+            platform,
+          });
+          if (check.requiresRollback) {
+            rollbackVerified = false;
+          }
+        } catch {
+          rollbackVerified = false;
+        }
+
+        if (!rollbackRes.success || !rollbackVerified) {
+          // Rollback failed -> TRIP AUTONOMY CIRCUIT BREAKER
+          await this.tripCircuitBreaker(
+            websiteId,
+            `Automatic rollback failed verification after execution failure on ${targetUrl}`
+          );
+        }
 
         await prisma.actionExecution.update({
           where: { id: actionExecution.id },
@@ -470,10 +554,17 @@ export class ActionExecutionPipeline {
 
         rolledBack = true;
       } else {
-        // Verification succeeded
+        // Verification succeeded -> Advance to VERIFIED_COMPLETED
+        // Compute attribution maturity date (T+44 days)
+        const attributionMaturityAt = new Date(Date.now() + 44 * 24 * 60 * 60 * 1000);
+
         await prisma.actionExecution.update({
           where: { id: actionExecution.id },
-          data: { state: ActionStatus.VERIFIED_COMPLETED },
+          data: {
+            state: ActionStatus.VERIFIED_COMPLETED,
+            verifiedAt: new Date(),
+            attributionMaturityAt,
+          },
         });
 
         if (taskId) {
@@ -487,7 +578,7 @@ export class ActionExecutionPipeline {
           await ActionApprovalCenter.markVerified(boundApprovalId, userId || 'VERIFIER');
         }
 
-        // Schedule deterministic causal attribution evaluation
+        // Schedule causal attribution evaluation
         await AttributionQueueProducer.enqueueAttributionEvaluation({
           jobType: 'EVALUATE_ATTRIBUTION',
           websiteId,
@@ -498,10 +589,14 @@ export class ActionExecutionPipeline {
       }
     }
 
+    const finalState = rolledBack
+      ? ActionStatus.REVERTED_RESTORED
+      : (autoVerify ? ActionStatus.VERIFIED_COMPLETED : ActionStatus.AWAITING_VERIFICATION);
+
     return {
       success: !rolledBack,
       actionExecutionId: actionExecution.id,
-      state: rolledBack ? ActionStatus.REVERTED_RESTORED : (autoVerify ? ActionStatus.VERIFIED_COMPLETED : ActionStatus.AWAITING_VERIFICATION),
+      state: finalState,
       executionMode,
       riskTier,
       preStateSnapshot,
@@ -516,7 +611,7 @@ export class ActionExecutionPipeline {
 
   /**
    * Executes a 1-click deterministic rollback by restoring the pre-state snapshot.
-   * Survives worker restarts by reloading snapshot from durable database storage.
+   * Fails closed and trips circuit breaker if verification fails.
    */
   public static async rollback(params: {
     actionExecutionId: string;
@@ -537,7 +632,7 @@ export class ActionExecutionPipeline {
       throw new Error(`Action execution '${actionExecutionId}' not found for website '${websiteId}'`);
     }
 
-    // Retrieve snapshot from persistent SnapshotService (handles worker restart recovery)
+    // Retrieve snapshot from persistent SnapshotService
     const snapshotEntity = await ActionSnapshotService.getPreStateSnapshot(actionExecutionId);
     let preStateSnapshot = snapshotEntity?.preStateJson ? JSON.parse(snapshotEntity.preStateJson) : null;
 
@@ -576,7 +671,16 @@ export class ActionExecutionPipeline {
         rollbackVerified = false;
       }
     } catch {
-      // Best effort verification check
+      rollbackVerified = false;
+    }
+
+    if (!rollbackResult.success || !rollbackVerified) {
+      // Fail-closed & trip circuit breaker
+      await this.tripCircuitBreaker(
+        websiteId,
+        `Manual rollback failed verification for action execution '${actionExecutionId}' on ${execution.targetUrl}`
+      );
+      throw new Error(`ROLLBACK_VERIFICATION_FAILED: Rollback could not be verified on '${execution.targetUrl}'. Autonomy circuit breaker tripped.`);
     }
 
     // Update ActionExecution state to REVERTED_RESTORED
@@ -603,7 +707,7 @@ export class ActionExecutionPipeline {
       rolledBackByUserId: userId,
       reason: reason || 'Rollback triggered',
       preStateRestored: rollbackResult.restoredState,
-      success: rollbackResult.success && rollbackVerified,
+      success: true,
       durationMs: Date.now() - startTime,
     });
 

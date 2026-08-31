@@ -261,6 +261,8 @@ export class CausalAttributionEngine {
     let outcomeCategory: AttributionOutcomeCategory = 'NEUTRAL';
 
     const isShortWindow = evaluationHorizonDays < MIN_ATTRIBUTION_HORIZON_DAYS;
+    const hasSufficientCompleteness = treatmentPreFacts.length > 0 && treatmentPostFacts.length > 0;
+    const hasValidControl = controlMatches.length === 0 || avgControlSimilarity >= 0.50;
 
     if (now < evaluationStartDate) {
       outcomeCategory = 'PENDING_DATA';
@@ -268,8 +270,8 @@ export class CausalAttributionEngine {
       outcomeCategory = 'MEASURING';
     } else if (
       isShortWindow ||
-      preObservedDays === 0 ||
-      postObservedDays === 0 ||
+      !hasSufficientCompleteness ||
+      !hasValidControl ||
       isSerpVolatile ||
       confidenceScore < ATTRIBUTION_INCONCLUSIVE_CONFIDENCE_THRESHOLD
     ) {
