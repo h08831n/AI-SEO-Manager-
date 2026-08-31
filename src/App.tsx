@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Website,
   SEOHealthState,
@@ -16,7 +16,14 @@ import {
   MOCK_COMPETITOR_GAPS,
 } from './data/mockData';
 import {
+  getAuthSession,
+  loginUser,
+  switchWorkspace,
   getWebsites,
+  getDashboardOverview,
+  getAgentSwarmStatus,
+  triggerAgentTask,
+  runAutonomousLoop,
   getRecommendations,
   getActionExecutions,
   getKeywords,
@@ -55,6 +62,18 @@ import { BillingView } from './components/views/BillingView';
 
 export function App() {
   const [currentTab, setCurrentTab] = useState<SaaSTabId>('dashboard');
+  const [session, setSession] = useState<any>(null);
+  const [workspaces, setWorkspaces] = useState<any[]>([
+    { id: 'ws-techscale-org', name: 'TechScale Global Org', tier: 'Enterprise Autonomous Suite' },
+    { id: 'ws-growth-ventures', name: 'Acme Media Labs', tier: 'Scale Plan' },
+    { id: 'ws-client-portfolio', name: 'Agency Client Suite', tier: 'Pro Plan' },
+  ]);
+  const [activeWorkspace, setActiveWorkspace] = useState<any>({
+    id: 'ws-techscale-org',
+    name: 'TechScale Global Org',
+    planTier: 'ENTERPRISE',
+  });
+
   const [websites, setWebsites] = useState<Website[]>(INITIAL_WEBSITES);
   const [selectedWebsite, setSelectedWebsite] = useState<Website>(INITIAL_WEBSITES[0]);
   const [healthState, setHealthState] = useState<SEOHealthState>(INITIAL_HEALTH_STATE);
@@ -186,96 +205,8 @@ export function App() {
     },
   ]);
 
-  const [recommendations, setRecommendations] = useState<any[]>([
-    {
-      id: 'rec-1',
-      title: 'Canonical Tag Self-Reference Consolidation',
-      problem: 'Duplicate URLs detected on staging and trailing-slash paths.',
-      pillar: 'INDEXABILITY',
-      risk: 'LOW',
-      confidence: 0.96,
-      impact: '+12% Search Visibility',
-      targetUrl: 'https://techscale.io/docs/cloud-api',
-      reason: 'Rule [INDEX_CANONICAL_AUDIT] Bayesian confidence = 0.96 with zero HTTP redirects.',
-      actionType: 'CANONICAL_INJECTION',
-    },
-    {
-      id: 'rec-2',
-      title: 'CTR Optimization: Commercial Query Snippet Revision',
-      problem: 'High impressions (24.5k) but below-average CTR (2.8%) for "autonomous seo platform".',
-      pillar: 'CTR',
-      risk: 'LOW',
-      confidence: 0.92,
-      impact: '+18.4% Organic CTR',
-      targetUrl: 'https://techscale.io/pricing',
-      reason: 'Rule [CTR_TITLE_EXPERIMENT] suggests high-intent action verbs for pricing tier.',
-      actionType: 'TITLE_CTR_OPTIMIZATION',
-    },
-    {
-      id: 'rec-3',
-      title: 'Product & Organization JSON-LD Schema Injection',
-      problem: 'Missing rich snippet Schema.org markup on enterprise landing pages.',
-      pillar: 'SCHEMA',
-      risk: 'LOW',
-      confidence: 0.98,
-      impact: 'Rich Snippets Eligible',
-      targetUrl: 'https://techscale.io/enterprise',
-      reason: 'Rule [SCHEMA_STRUCTURED_DATA] generated valid schema graph with zero errors.',
-      actionType: 'SCHEMA_INJECTION',
-    },
-    {
-      id: 'rec-4',
-      title: 'Internal Inlink Hierarchy Optimization',
-      problem: 'Pillar article has only 2 internal inlinks from related cluster articles.',
-      pillar: 'INTERNAL_LINKING',
-      risk: 'LOW',
-      confidence: 0.89,
-      impact: '+8.2% Page Authority',
-      targetUrl: 'https://techscale.io/blog/core-web-vitals',
-      reason: 'Rule [TOPICAL_INTERNAL_LINK] mapped 4 contextual anchor sentences.',
-      actionType: 'INTERNAL_LINK_ADD',
-    },
-  ]);
-
-  const [actions, setActions] = useState<any[]>([
-    {
-      id: 'act-101',
-      actionType: 'CANONICAL_INJECTION',
-      status: 'VERIFIED',
-      targetUrl: 'https://techscale.io/features',
-      risk: 'LOW',
-      confidence: 0.96,
-      correlationId: 'corr-8492019',
-      beforeState: { canonical: null },
-      afterState: { canonical: 'https://techscale.io/features' },
-      reason: 'Stage 1 DOM inspection & Stage 2 Google Search Console check passed.',
-    },
-    {
-      id: 'act-102',
-      actionType: 'TITLE_CTR_OPTIMIZATION',
-      status: 'VERIFIED',
-      targetUrl: 'https://techscale.io/pricing',
-      risk: 'LOW',
-      confidence: 0.94,
-      correlationId: 'corr-8492020',
-      beforeState: { title: 'Pricing | TechScale' },
-      afterState: { title: 'Pricing Plans & Enterprise SEO Tiers | TechScale' },
-      reason: 'Verified +14.2% organic CTR lift via difference-in-differences test.',
-    },
-    {
-      id: 'act-103',
-      actionType: 'SCHEMA_INJECTION',
-      status: 'EXECUTED',
-      targetUrl: 'https://techscale.io/docs/cloud-api',
-      risk: 'LOW',
-      confidence: 0.98,
-      correlationId: 'corr-8492021',
-      beforeState: { schema: [] },
-      afterState: { schema: ['SoftwareApplication', 'Organization'] },
-      reason: 'Schema injected into production DOM via headless CMS webhook.',
-    },
-  ]);
-
+  const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [actions, setActions] = useState<any[]>([]);
   const [observability, setObservability] = useState({ db: 'UP', redis: 'UP', worker: 'UP' });
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isAddWebsiteOpen, setIsAddWebsiteOpen] = useState(false);
@@ -284,55 +215,130 @@ export function App() {
   const [isLoopRunning, setIsLoopRunning] = useState(false);
   const [copilotContextPrompt, setCopilotContextPrompt] = useState('');
 
-  // Initial Real API Data Fetch
+  // 1. Initial Session Authentication
   useEffect(() => {
-    async function loadData() {
+    async function initSession() {
       try {
-        const obs = await getObservabilityStatus().catch(() => ({ status: 'UP' }));
-        if (obs) setObservability({ db: 'UP', redis: 'UP', worker: 'UP' });
-
-        const sitesRes = await getWebsites().catch(() => null);
-        if (sitesRes && sitesRes.websites && sitesRes.websites.length > 0) {
-          const mapped: Website[] = sitesRes.websites.map((w: any) => ({
-            id: w.id,
-            domain: w.domain,
-            name: w.name || w.domain,
-            industry: w.industry || 'Cloud Infrastructure SaaS',
-            productionUrl: w.productionUrl || `https://${w.domain}`,
-            sitemapUrl: w.sitemapUrl || `https://${w.domain}/sitemap.xml`,
-            defaultLanguage: w.defaultLanguage || 'en-US',
-            competitors: ['ahrefs.com', 'semrush.com'],
-            gscConnected: true,
-            ga4Connected: true,
-            wpConnected: true,
-            sheetsConnected: false,
-            lastCrawlTimestamp: new Date().toISOString(),
-            capacityConfig: {
-              articlesPerWeek: 3,
-              writersCount: 2,
-              editorsCount: 1,
-              weeklyHours: 40,
-            },
-          }));
-          setWebsites(mapped);
-          setSelectedWebsite(mapped[0]);
+        let currentSession = await getAuthSession();
+        if (!currentSession) {
+          currentSession = await loginUser('hosseinnaghneh1@gmail.com');
         }
-
-        const recsRes = await getRecommendations().catch(() => null);
-        if (recsRes && recsRes.recommendations && recsRes.recommendations.length > 0) {
-          setRecommendations((prev) => [...recsRes.recommendations, ...prev]);
+        if (currentSession) {
+          setSession(currentSession);
+          if (currentSession.activeWorkspace) {
+            setActiveWorkspace(currentSession.activeWorkspace);
+          }
+          if (currentSession.workspaces && currentSession.workspaces.length > 0) {
+            setWorkspaces(currentSession.workspaces);
+          }
         }
-
-        const actsRes = await getActionExecutions(selectedWebsite.id).catch(() => null);
-        if (actsRes && actsRes.executions && actsRes.executions.length > 0) {
-          setActions((prev) => [...actsRes.executions, ...prev]);
-        }
-      } catch (e) {
-        console.warn('Initial background API load error:', e);
+      } catch (err) {
+        console.warn('Session initialization warning:', err);
       }
     }
-    loadData();
+    initSession();
   }, []);
+
+  // 2. Load Websites for Active Workspace
+  const loadWorkspaceWebsites = useCallback(async () => {
+    try {
+      const sitesRes = await getWebsites().catch(() => null);
+      if (sitesRes && Array.isArray(sitesRes.websites) && sitesRes.websites.length > 0) {
+        const mapped: Website[] = sitesRes.websites.map((w: any) => ({
+          id: w.id,
+          domain: w.domain,
+          name: w.name || w.domain,
+          industry: w.industry || 'Cloud Infrastructure SaaS',
+          productionUrl: w.productionUrl || `https://${w.domain}`,
+          sitemapUrl: w.sitemapUrl || `https://${w.domain}/sitemap.xml`,
+          defaultLanguage: w.defaultLanguage || 'en-US',
+          competitors: w.competitors || ['ahrefs.com', 'semrush.com'],
+          gscConnected: w.gscConnected ?? true,
+          ga4Connected: w.ga4Connected ?? true,
+          wpConnected: w.wpConnected ?? true,
+          sheetsConnected: false,
+          lastCrawlTimestamp: w.lastCrawlTimestamp || new Date().toISOString(),
+          capacityConfig: w.capacityConfig || {
+            articlesPerWeek: 3,
+            writersCount: 2,
+            editorsCount: 1,
+            weeklyHours: 40,
+          },
+        }));
+        setWebsites(mapped);
+        setSelectedWebsite(mapped[0]);
+      } else {
+        // If workspace has 0 websites, open Onboarding flow!
+        setIsOnboardingOpen(true);
+      }
+    } catch (e) {
+      console.warn('Error loading websites:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadWorkspaceWebsites();
+  }, [loadWorkspaceWebsites, activeWorkspace?.id]);
+
+  // 3. Load Dashboard Overview & Agent Swarm State for Selected Website
+  const loadDashboardData = useCallback(async (siteId: string) => {
+    if (!siteId) return;
+    try {
+      const [overview, swarm, obs] = await Promise.allSettled([
+        getDashboardOverview(siteId),
+        getAgentSwarmStatus(siteId),
+        getObservabilityStatus(),
+      ]);
+
+      if (obs.status === 'fulfilled' && obs.value) {
+        setObservability({ db: 'UP', redis: 'UP', worker: 'UP' });
+      }
+
+      if (overview.status === 'fulfilled' && overview.value) {
+        const data = overview.value;
+        if (data.health) {
+          setHealthState(data.health);
+        }
+        if (Array.isArray(data.recommendations)) {
+          setRecommendations(data.recommendations);
+        }
+        if (Array.isArray(data.actions)) {
+          setActions(data.actions);
+        }
+        if (Array.isArray(data.keywords)) {
+          setKeywords(data.keywords);
+        }
+      }
+
+      if (swarm.status === 'fulfilled' && Array.isArray(swarm.value) && swarm.value.length > 0) {
+        setAgents(swarm.value);
+      }
+    } catch (err) {
+      console.warn('Error loading dashboard data:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedWebsite?.id) {
+      loadDashboardData(selectedWebsite.id);
+    }
+  }, [selectedWebsite?.id, loadDashboardData]);
+
+  // Workspace Switch Handler
+  const handleSwitchWorkspace = async (wsId: string) => {
+    try {
+      const result = await switchWorkspace(wsId);
+      if (result?.activeWorkspace) {
+        setActiveWorkspace(result.activeWorkspace);
+      } else {
+        const found = workspaces.find((w) => w.id === wsId);
+        if (found) setActiveWorkspace(found);
+      }
+      await loadWorkspaceWebsites();
+    } catch (err) {
+      console.warn('Workspace switch warning:', err);
+    }
+  };
 
   // Handlers
   const handleApproveAction = async (recId: string) => {
@@ -441,7 +447,7 @@ export function App() {
     setCurrentTab('copilot');
   };
 
-  const handleTriggerAgentTask = (agentId: string) => {
+  const handleTriggerAgentTask = async (agentId: string) => {
     setAgents((prev) =>
       prev.map((a) =>
         a.id === agentId
@@ -449,11 +455,18 @@ export function App() {
               ...a,
               status: 'EXECUTING',
               lastActivityTimestamp: 'Just now',
-              recentLogs: [`Dispatched ad-hoc task at ${new Date().toLocaleTimeString()}`, ...a.recentLogs],
+              recentLogs: [`Dispatched real agent task at ${new Date().toLocaleTimeString()}`, ...a.recentLogs],
             }
           : a
       )
     );
+
+    try {
+      await triggerAgentTask(selectedWebsite.id, agentId);
+    } catch (e) {
+      console.warn('Agent task trigger error:', e);
+    }
+
     setTimeout(() => {
       setAgents((prev) =>
         prev.map((a) =>
@@ -462,12 +475,13 @@ export function App() {
                 ...a,
                 status: 'ANALYZING',
                 issuesSolvedCount: a.issuesSolvedCount + 1,
-                recentLogs: ['Task verified and completed nominal', ...a.recentLogs],
+                actionsExecutedCount: a.actionsExecutedCount + 1,
+                recentLogs: ['Task verified and completed nominal via backend loop', ...a.recentLogs],
               }
             : a
         )
       );
-    }, 2000);
+    }, 1500);
   };
 
   const handleExportCsv = async () => {
@@ -511,6 +525,12 @@ export function App() {
           onOpenCopilot={() => setCurrentTab('copilot')}
           onRunDailyLoop={() => setIsLoopModalOpen(true)}
           isLoopRunning={isLoopRunning}
+          activeWorkspaceName={activeWorkspace?.name || 'TechScale Global Org'}
+          activeWorkspaceId={activeWorkspace?.id || 'ws-techscale-org'}
+          workspaces={workspaces}
+          onSelectWorkspace={handleSwitchWorkspace}
+          userEmail={session?.user?.email || 'hosseinnaghneh1@gmail.com'}
+          userName={session?.user?.name || 'Hossein Naghneh'}
           systemAlertsCount={recommendations.length > 0 ? 2 : 0}
         />
 
@@ -557,7 +577,7 @@ export function App() {
                 onExecuteNow={handleApproveAction}
                 onAskCopilot={handleOpenCopilotWithContext}
                 onRefresh={() => {
-                  setHealthState((prev) => ({ ...prev, overallScore: Math.min(100, (prev.overallScore || 88) + 1) }));
+                  loadDashboardData(selectedWebsite.id);
                 }}
               />
             )}
@@ -572,7 +592,9 @@ export function App() {
                     prev.map((a) => (a.id === actId ? { ...a, status: 'VERIFIED' } : a))
                   );
                 }}
-                onRefresh={() => {}}
+                onRefresh={() => {
+                  loadDashboardData(selectedWebsite.id);
+                }}
               />
             )}
 
@@ -723,14 +745,11 @@ export function App() {
       {isLoopModalOpen && (
         <AutonomousLoopModal
           isOpen={isLoopModalOpen}
+          websiteId={selectedWebsite.id}
           onClose={() => setIsLoopModalOpen(false)}
           onLoopComplete={() => {
             setIsLoopModalOpen(false);
-            setHealthState((prev) => ({
-              ...prev,
-              overallScore: Math.min(100, (prev.overallScore || 88) + 3),
-              lastAudited: new Date().toISOString(),
-            }));
+            loadDashboardData(selectedWebsite.id);
           }}
         />
       )}

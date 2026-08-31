@@ -28,7 +28,13 @@ interface TopNavbarProps {
   onRunDailyLoop: () => void;
   isLoopRunning: boolean;
   activeWorkspaceName?: string;
+  activeWorkspaceId?: string;
+  userEmail?: string;
+  userName?: string;
+  userRole?: string;
+  workspaces?: Array<{ id: string; name: string; tier?: string; role?: string }>;
   onSelectWorkspace?: (wsId: string) => void;
+  onSignOut?: () => void;
   systemAlertsCount?: number;
 }
 
@@ -42,6 +48,17 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   onRunDailyLoop,
   isLoopRunning,
   activeWorkspaceName = 'TechScale Global Org',
+  activeWorkspaceId = 'ws-techscale-org',
+  userEmail = 'hosseinnaghneh1@gmail.com',
+  userName = 'Hossein Naghneh',
+  userRole = 'Senior SEO Architect (Owner)',
+  workspaces = [
+    { id: 'ws-techscale-org', name: 'TechScale Global Org', tier: 'Enterprise Autonomous Suite' },
+    { id: 'ws-growth-ventures', name: 'Acme Media Labs', tier: 'Scale Plan' },
+    { id: 'ws-client-portfolio', name: 'Agency Client Suite', tier: 'Pro Plan' },
+  ],
+  onSelectWorkspace,
+  onSignOut,
   systemAlertsCount = 2,
 }) => {
   const [isSiteDropdownOpen, setIsSiteDropdownOpen] = useState(false);
@@ -49,11 +66,12 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   const [isUserDropdownOpen, setIsUserDropdownOpen] = useState(false);
   const [isAlertsOpen, setIsAlertsOpen] = useState(false);
 
-  const workspaces = [
-    { id: 'ws-techscale-org', name: 'TechScale Global Org', tier: 'Enterprise Plan', current: true },
-    { id: 'ws-growth-ventures', name: 'Acme Media Labs', tier: 'Pro Plan', current: false },
-    { id: 'ws-client-portfolio', name: 'Agency Client Suite', tier: 'Scale Plan', current: false },
-  ];
+  const initials = userName
+    .split(' ')
+    .map((p) => p[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2) || 'HN';
 
   return (
     <header className="sticky top-0 z-30 h-14 bg-slate-950/90 border-b border-slate-800/80 backdrop-blur-md px-4 flex items-center justify-between select-none">
@@ -83,16 +101,19 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               {workspaces.map((ws) => (
                 <div
                   key={ws.id}
-                  onClick={() => setIsWorkspaceDropdownOpen(false)}
+                  onClick={() => {
+                    if (onSelectWorkspace) onSelectWorkspace(ws.id);
+                    setIsWorkspaceDropdownOpen(false);
+                  }}
                   className={`flex items-center justify-between p-2 rounded-lg text-xs cursor-pointer ${
-                    ws.current ? 'bg-indigo-500/10 text-indigo-300 font-semibold' : 'hover:bg-slate-800 text-slate-300'
+                    ws.id === activeWorkspaceId ? 'bg-indigo-500/10 text-indigo-300 font-semibold' : 'hover:bg-slate-800 text-slate-300'
                   }`}
                 >
                   <div>
                     <div className="font-medium">{ws.name}</div>
-                    <div className="text-[10px] text-slate-500 font-mono">{ws.tier}</div>
+                    <div className="text-[10px] text-slate-500 font-mono">{ws.tier || 'Enterprise'}</div>
                   </div>
-                  {ws.current && <Check className="w-3.5 h-3.5 text-indigo-400" />}
+                  {ws.id === activeWorkspaceId && <Check className="w-3.5 h-3.5 text-indigo-400" />}
                 </div>
               ))}
             </div>
@@ -269,7 +290,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             className="flex items-center space-x-2 p-1 pl-1.5 rounded-lg hover:bg-slate-900 border border-transparent hover:border-slate-800 transition-all cursor-pointer"
           >
             <div className="w-7 h-7 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center justify-center font-mono">
-              HN
+              {initials}
             </div>
             <ChevronDown className="w-3 h-3 text-slate-500 hidden sm:block" />
           </button>
@@ -277,11 +298,11 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           {isUserDropdownOpen && (
             <div className="absolute top-full right-0 mt-1.5 w-64 rounded-xl bg-slate-900 border border-slate-800 shadow-xl p-2 space-y-1 z-50 animate-in fade-in zoom-in-95 text-xs">
               <div className="p-2.5 border-b border-slate-800">
-                <div className="font-bold text-white">Hossein N.</div>
-                <div className="text-[11px] text-slate-400 font-mono">hosseinnaghneh1@gmail.com</div>
+                <div className="font-bold text-white">{userName}</div>
+                <div className="text-[11px] text-slate-400 font-mono">{userEmail}</div>
                 <div className="mt-1.5 inline-flex items-center space-x-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[10px] font-mono border border-emerald-500/20">
                   <Shield className="w-2.5 h-2.5" />
-                  <span>Senior SEO Architect (Owner)</span>
+                  <span>{userRole}</span>
                 </div>
               </div>
 
@@ -303,7 +324,10 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
               <div className="pt-1 border-t border-slate-800">
                 <button
-                  onClick={() => setIsUserDropdownOpen(false)}
+                  onClick={() => {
+                    setIsUserDropdownOpen(false);
+                    if (onSignOut) onSignOut();
+                  }}
                   className="w-full flex items-center space-x-2 p-2 rounded-lg hover:bg-rose-500/10 text-rose-400 transition-colors cursor-pointer"
                 >
                   <LogOut className="w-3.5 h-3.5" />

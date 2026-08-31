@@ -9,11 +9,13 @@ import {
   Layers,
   ArrowRight,
 } from 'lucide-react';
+import { runAutonomousLoop } from '../services/api';
 
 interface AutonomousLoopModalProps {
   isOpen: boolean;
   onClose: () => void;
   onLoopComplete: () => void;
+  websiteId?: string;
 }
 
 const LOOP_STEPS = [
@@ -65,6 +67,7 @@ export const AutonomousLoopModal: React.FC<AutonomousLoopModalProps> = ({
   isOpen,
   onClose,
   onLoopComplete,
+  websiteId,
 }) => {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
@@ -84,10 +87,15 @@ export const AutonomousLoopModal: React.FC<AutonomousLoopModalProps> = ({
     return () => clearTimeout(timer);
   }, [isOpen, isRunning, currentStepIndex, onLoopComplete]);
 
-  const handleStartLoop = () => {
+  const handleStartLoop = async () => {
     setCurrentStepIndex(0);
     setIsRunning(true);
     setIsFinished(false);
+    if (websiteId) {
+      runAutonomousLoop(websiteId).catch((err) => {
+        console.warn('Background autonomous loop error:', err);
+      });
+    }
   };
 
   if (!isOpen) return null;

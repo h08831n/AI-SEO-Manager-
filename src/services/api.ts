@@ -16,11 +16,12 @@ import {
 } from '../shared/contracts';
 
 // Current session storage for active workspace / auth token
-let activeWorkspaceId = 'ws-techscale-org';
-let activeAuthToken = 'mock-jwt-token-techscale';
+let activeWorkspaceId = localStorage.getItem('aiseo_workspace_id') || 'ws-techscale-org';
+let activeAuthToken = localStorage.getItem('aiseo_auth_token') || '';
 
 export function setActiveWorkspaceId(workspaceId: string) {
   activeWorkspaceId = workspaceId;
+  localStorage.setItem('aiseo_workspace_id', workspaceId);
 }
 
 export function getActiveWorkspaceId(): string {
@@ -29,6 +30,15 @@ export function getActiveWorkspaceId(): string {
 
 export function setAuthToken(token: string) {
   activeAuthToken = token;
+  if (token) {
+    localStorage.setItem('aiseo_auth_token', token);
+  } else {
+    localStorage.removeItem('aiseo_auth_token');
+  }
+}
+
+export function getAuthToken(): string {
+  return activeAuthToken;
 }
 
 function getHeaders(customHeaders?: Record<string, string>): Record<string, string> {
@@ -43,6 +53,123 @@ function getHeaders(customHeaders?: Record<string, string>): Record<string, stri
     Object.assign(headers, customHeaders);
   }
   return headers;
+}
+
+// -------------------------------------------------------------
+// 0. Authentication & Session APIs
+// -------------------------------------------------------------
+
+export async function getAuthSession(): Promise<any> {
+  const res = await fetch('/api/auth/session', { headers: getHeaders() });
+  if (!res.ok) {
+    return null;
+  }
+  const data = await res.json();
+  if (data?.session?.token) {
+    setAuthToken(data.session.token);
+  }
+  if (data?.session?.activeWorkspace?.id) {
+    setActiveWorkspaceId(data.session.activeWorkspace.id);
+  }
+  return data.session;
+}
+
+export async function loginUser(email?: string): Promise<any> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new Error('Login failed');
+  const data = await res.json();
+  if (data?.session?.token) {
+    setAuthToken(data.session.token);
+  }
+  if (data?.session?.activeWorkspace?.id) {
+    setActiveWorkspaceId(data.session.activeWorkspace.id);
+  }
+  return data.session;
+}
+
+export async function signupUser(email: string, name?: string, workspaceName?: string): Promise<any> {
+  const res = await fetch('/api/auth/signup', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ email, name, workspaceName }),
+  });
+  if (!res.ok) throw new Error('Signup failed');
+  const data = await res.json();
+  if (data?.session?.token) {
+    setAuthToken(data.session.token);
+  }
+  if (data?.session?.activeWorkspace?.id) {
+    setActiveWorkspaceId(data.session.activeWorkspace.id);
+  }
+  return data.session;
+}
+
+export async function switchWorkspace(workspaceId: string): Promise<any> {
+  const res = await fetch('/api/auth/switch-workspace', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ workspaceId }),
+  });
+  if (!res.ok) throw new Error('Failed to switch workspace');
+  const data = await res.json();
+  setActiveWorkspaceId(workspaceId);
+  if (data?.token) {
+    setAuthToken(data.token);
+  }
+  return data;
+}
+
+// -------------------------------------------------------------
+// 0.1. Dashboard Aggregation APIs
+// -------------------------------------------------------------
+
+export async function getDashboardOverview(websiteId?: string): Promise<any> {
+  const q = websiteId ? `?websiteId=${websiteId}` : '';
+  const res = await fetch(`/api/dashboard/overview${q}`, {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to load dashboard overview');
+  }
+  return res.json();
+}
+
+// -------------------------------------------------------------
+// 0.2. SEO Agents Swarm Runtime APIs
+// -------------------------------------------------------------
+
+export async function getAgentSwarmStatus(websiteId?: string): Promise<any[]> {
+  const q = websiteId ? `?websiteId=${websiteId}` : '';
+  const res = await fetch(`/api/agents${q}`, {
+    headers: getHeaders(websiteId ? { 'x-website-id': websiteId } : {}),
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.agents || [];
+}
+
+export async function triggerAgentTask(websiteId: string, agentId: string, taskType?: string): Promise<any> {
+  const res = await fetch(`/api/agents/${agentId}/task`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ websiteId, taskType }),
+  });
+  if (!res.ok) throw new Error('Agent task execution failed');
+  return res.json();
+}
+
+export async function runAutonomousLoop(websiteId: string): Promise<any> {
+  const res = await fetch('/api/agents/autonomous-loop', {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ websiteId }),
+  });
+  if (!res.ok) throw new Error('Autonomous loop execution failed');
+  return res.json();
 }
 
 // -------------------------------------------------------------

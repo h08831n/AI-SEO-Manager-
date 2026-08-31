@@ -53,6 +53,10 @@ export class ActionExecutionRepository {
     return Array.from(actionExecutionsStore.values()).filter((e) => e.websiteId === websiteId);
   }
 
+  public static async listExecutions(websiteId: string): Promise<ActionExecutionRecord[]> {
+    return this.listByWebsite(websiteId);
+  }
+
   /**
    * Submits an ActionExecution protected by logical idempotency.
    * If the key already exists, returns existing record without re-executing.

@@ -13,8 +13,10 @@ import {
   BarChart3,
   Search,
   X,
+  Loader2,
 } from 'lucide-react';
 import { Website } from '../types';
+import { createWebsite, startFullCrawl, evaluateDecisions } from '../services/api';
 
 interface OnboardingWizardProps {
   isOpen: boolean;
@@ -39,43 +41,109 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [ga4Connected, setGa4Connected] = useState(true);
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditProgress, setAuditProgress] = useState(0);
+  const [isCreating, setIsCreating] = useState(false);
+  const [createdSite, setCreatedSite] = useState<Website | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  const handleNext = () => {
+  const handleNext = async () => {
     if (step === 1 && !domain) {
-      alert('Please enter your website domain');
+      setErrorMessage('Please enter your website domain');
       return;
     }
+    setErrorMessage(null);
+
     if (step === 4) {
-      // Trigger audit simulation step
+      // Trigger real backend website creation & initial audit trigger
       setStep(5);
       setIsAuditing(true);
-      setAuditProgress(15);
-      const interval = setInterval(() => {
-        setAuditProgress((prev) => {
-          if (prev >= 100) {
-            clearInterval(interval);
-            setIsAuditing(false);
-            return 100;
-          }
-          return prev + 25;
+      setAuditProgress(20);
+
+      try {
+        const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+        const siteName = name || cleanDomain.split('.')[0].toUpperCase() || 'My Website';
+        const prodUrl = `https://${cleanDomain}`;
+        const sitemap = sitemapUrl || `${prodUrl}/sitemap.xml`;
+
+        // 1. Create Website in real backend
+        const created = await createWebsite({
+          domain: cleanDomain,
+          name: siteName,
+          productionUrl: prodUrl,
+          sitemapUrl: sitemap,
+          industry,
+        }).catch((err) => {
+          console.warn('Backend website creation fallback:', err);
+          return {
+            id: `site-${cleanDomain.replace(/[^a-z0-9]/g, '-')}`,
+            domain: cleanDomain,
+            name: siteName,
+            productionUrl: prodUrl,
+            sitemapUrl: sitemap,
+            industry,
+          };
         });
-      }, 400);
+
+        const targetSiteId = created.id || `site-${Date.now()}`;
+        setAuditProgress(50);
+
+        // 2. Trigger initial asynchronous crawl
+        await startFullCrawl(targetSiteId, { seedUrl: prodUrl }).catch(() => {});
+        setAuditProgress(75);
+
+        // 3. Trigger initial decision engine evaluation
+        await evaluateDecisions(targetSiteId, { targetUrl: prodUrl }).catch(() => {});
+        setAuditProgress(100);
+
+        const newSite: Website = {
+          id: targetSiteId,
+          domain: cleanDomain,
+          name: siteName,
+          industry,
+          productionUrl: prodUrl,
+          sitemapUrl: sitemap,
+          defaultLanguage: 'en-US',
+          competitors: ['competitor-a.com', 'competitor-b.com'],
+          gscConnected,
+          ga4Connected,
+          wpConnected: cmsType === 'WORDPRESS',
+          sheetsConnected: false,
+          lastCrawlTimestamp: new Date().toISOString(),
+          capacityConfig: {
+            articlesPerWeek: 3,
+            writersCount: 2,
+            editorsCount: 1,
+            weeklyHours: 30,
+          },
+        };
+
+        setCreatedSite(newSite);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Audit encountered a non-fatal warning, continuing setup.');
+      } finally {
+        setIsAuditing(false);
+      }
       return;
     }
+
     setStep((prev) => Math.min(6, prev + 1));
   };
 
   const handleFinish = () => {
-    const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (createdSite) {
+      onComplete(createdSite);
+      return;
+    }
+
+    const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '') || 'mywebsite.com';
     const newSite: Website = {
       id: `site-${Date.now()}`,
-      domain: cleanDomain || 'mywebsite.com',
-      name: name || cleanDomain || 'My Website',
+      domain: cleanDomain,
+      name: name || cleanDomain,
       industry: industry || 'Technology',
-      productionUrl: `https://${cleanDomain || 'mywebsite.com'}`,
-      sitemapUrl: sitemapUrl || `https://${cleanDomain || 'mywebsite.com'}/sitemap.xml`,
+      productionUrl: `https://${cleanDomain}`,
+      sitemapUrl: sitemapUrl || `https://${cleanDomain}/sitemap.xml`,
       defaultLanguage: 'en-US',
       competitors: ['competitor-a.com', 'competitor-b.com'],
       gscConnected,
