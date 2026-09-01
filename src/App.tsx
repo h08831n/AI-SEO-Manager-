@@ -43,6 +43,7 @@ import { CommandPalette } from './components/layout/CommandPalette';
 import { AddWebsiteModal } from './components/ui/AddWebsiteModal';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { AutonomousLoopModal } from './components/AutonomousLoopModal';
+import { CustomerJourneyModal } from './components/CustomerJourneyModal';
 
 // Views
 import { DashboardView } from './components/views/DashboardView';
@@ -209,6 +210,8 @@ export function App() {
   const [actions, setActions] = useState<any[]>([]);
   const [observability, setObservability] = useState({ db: 'UP', redis: 'UP', worker: 'UP' });
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isCustomerJourneyOpen, setIsCustomerJourneyOpen] = useState(false);
+  const [customerJourneyInitialStep, setCustomerJourneyInitialStep] = useState(1);
   const [isAddWebsiteOpen, setIsAddWebsiteOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isLoopModalOpen, setIsLoopModalOpen] = useState(false);
@@ -521,6 +524,10 @@ export function App() {
           selectedWebsite={selectedWebsite}
           onSelectWebsite={setSelectedWebsite}
           onOpenAddWebsiteModal={() => setIsOnboardingOpen(true)}
+          onOpenCustomerJourney={() => {
+            setCustomerJourneyInitialStep(1);
+            setIsCustomerJourneyOpen(true);
+          }}
           onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
           onOpenCopilot={() => setCurrentTab('copilot')}
           onRunDailyLoop={() => setIsLoopModalOpen(true)}
@@ -554,6 +561,10 @@ export function App() {
                 onRunDailyLoop={() => setIsLoopModalOpen(true)}
                 isLoopRunning={isLoopRunning}
                 onOpenCopilotWithContext={handleOpenCopilotWithContext}
+                onOpenCustomerJourney={(step = 1) => {
+                  setCustomerJourneyInitialStep(step);
+                  setIsCustomerJourneyOpen(true);
+                }}
               />
             )}
 
@@ -688,6 +699,32 @@ export function App() {
       </div>
 
       {/* Global Modals & Wizards */}
+      <CustomerJourneyModal
+        isOpen={isCustomerJourneyOpen}
+        onClose={() => setIsCustomerJourneyOpen(false)}
+        initialStep={customerJourneyInitialStep}
+        onJourneyComplete={(newSite, data) => {
+          setWebsites((prev) => [newSite, ...prev.filter((w) => w.id !== newSite.id)]);
+          setSelectedWebsite(newSite);
+          if (data?.user) {
+            setSession((prev: any) => ({ ...(prev || {}), user: data.user }));
+          }
+          if (data?.workspace) {
+            setActiveWorkspace(data.workspace);
+          }
+          if (data?.verifiedAction) {
+            setActions((prev) => [data.verifiedAction, ...prev]);
+            setHealthState((prev) => ({
+              ...prev,
+              overallScore: Math.min(100, (prev.overallScore || 88) + 6),
+              previousScore: prev.overallScore || 88,
+            }));
+          }
+          setIsCustomerJourneyOpen(false);
+          setCurrentTab('dashboard');
+        }}
+      />
+
       <OnboardingWizard
         isOpen={isOnboardingOpen}
         onClose={() => setIsOnboardingOpen(false)}

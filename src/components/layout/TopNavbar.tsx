@@ -23,6 +23,7 @@ interface TopNavbarProps {
   selectedWebsite: Website;
   onSelectWebsite: (site: Website) => void;
   onOpenAddWebsiteModal: () => void;
+  onOpenCustomerJourney?: () => void;
   onOpenCommandPalette: () => void;
   onOpenCopilot: () => void;
   onRunDailyLoop: () => void;
@@ -43,6 +44,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   selectedWebsite,
   onSelectWebsite,
   onOpenAddWebsiteModal,
+  onOpenCustomerJourney,
   onOpenCommandPalette,
   onOpenCopilot,
   onRunDailyLoop,
@@ -203,6 +205,18 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
       {/* Right: Actions, Alerts & User Profile */}
       <div className="flex items-center space-x-2 sm:space-x-3">
+        {/* Complete Customer Journey Walkthrough CTA */}
+        {onOpenCustomerJourney && (
+          <button
+            onClick={onOpenCustomerJourney}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-850 border border-emerald-500/40 text-emerald-300 text-xs font-semibold shadow-sm transition-all cursor-pointer"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            <span className="hidden lg:inline">Customer Journey (1-9)</span>
+            <span className="lg:hidden">Journey</span>
+          </button>
+        )}
+
         {/* Daily Autonomous SEO Loop CTA */}
         <button
           onClick={onRunDailyLoop}

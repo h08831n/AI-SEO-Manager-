@@ -46,6 +46,7 @@ interface DashboardViewProps {
   onRunDailyLoop: () => void;
   isLoopRunning: boolean;
   onOpenCopilotWithContext: (context: string) => void;
+  onOpenCustomerJourney?: (step?: number) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -186,6 +187,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onRunDailyLoop,
   isLoopRunning,
   onOpenCopilotWithContext,
+  onOpenCustomerJourney,
 }) => {
   const [selectedEvidence, setSelectedEvidence] = useState<any | null>(null);
 
@@ -200,6 +202,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
+      {/* 0. Complete Customer Journey Interactive Walkthrough Bar */}
+      {onOpenCustomerJourney && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900 to-emerald-950/40 border border-emerald-500/30 shadow-md">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-center space-x-3">
+              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center space-x-2">
+                  <span className="text-xs font-bold text-white tracking-tight">
+                    End-to-End Customer Journey
+                  </span>
+                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono font-bold">
+                    9 Steps Live
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  1. Account → 2. Workspace → 3. Website → 4. Integrations → 5. Crawl → 6. Brief → 7. Recommendations → 8. Approve Action → 9. Telemetry Verification
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => onOpenCustomerJourney(1)}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm shadow-emerald-950/40 transition-all cursor-pointer"
+              >
+                <Zap className="w-3 h-3 fill-current" />
+                <span>Launch Customer Journey (1-9)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Top Banner: SEO Health & Autonomous Swarm Controls */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-5 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900 to-slate-950 border border-slate-800 shadow-sm">
         <div className="flex items-center space-x-4">
