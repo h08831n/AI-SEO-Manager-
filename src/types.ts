@@ -55,7 +55,7 @@ export interface SEOHealthState {
   overallScore: number;
   previousScore: number;
   lastAudited: string;
-  pillars: Record<HealthPillarKey, HealthPillarDetail>;
+  pillars: Partial<Record<HealthPillarKey, HealthPillarDetail>> | Record<string, any>;
 }
 
 export interface CrawledUrl {

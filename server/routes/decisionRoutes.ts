@@ -11,7 +11,7 @@ const router = Router();
 // POST /api/decision/evaluate
 router.post('/evaluate', requireWebsiteAccess('EDITOR'), async (req: Request, res: Response) => {
   try {
-    const websiteId = req.website?.id || (req.headers['x-website-id'] as string) || (req.body.websiteId as string) || 'site-techscale-prod';
+    const websiteId = req.website!.id;
     const asyncMode = req.query.async === 'true';
 
     if (asyncMode) {

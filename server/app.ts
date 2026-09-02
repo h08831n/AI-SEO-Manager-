@@ -27,6 +27,9 @@ import agentRoutes from './routes/agentRoutes';
 export function createApp() {
   const app = express();
 
+  // Trust reverse proxy (Cloud Run, Nginx, load balancers)
+  app.set('trust proxy', 1);
+
   // Security Headers
   app.use(
     helmet({
@@ -60,6 +63,11 @@ export function createApp() {
     max: 180, // Limit each IP to 180 requests per windowMs
     standardHeaders: true,
     legacyHeaders: false,
+    validate: {
+      trustProxy: false,
+      xForwardedForHeader: false,
+      forwardedHeader: false,
+    },
     message: {
       status: 'ERROR',
       error: 'Too many requests from this IP. Please wait before retrying.',

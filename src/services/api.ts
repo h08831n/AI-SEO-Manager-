@@ -206,8 +206,41 @@ export async function createWebsite(data: {
 }
 
 export async function getWebsiteById(id: string): Promise<any> {
-  const res = await fetch(`/api/websites/${id}`, { headers: getHeaders() });
+  const res = await fetch(`/api/websites/${id}`, { headers: getHeaders({ 'x-website-id': id }) });
   if (!res.ok) throw new Error('Website not found');
+  return res.json();
+}
+
+export async function verifyDomainOwnership(websiteId: string): Promise<any> {
+  const res = await fetch(`/api/websites/${websiteId}/verify-domain`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Domain verification failed' }));
+    throw new Error(err.message || err.error || 'Domain verification failed');
+  }
+  return res.json();
+}
+
+export async function connectCmsIntegration(websiteId: string, platform: string, details?: any): Promise<any> {
+  const res = await fetch(`/api/websites/${websiteId}/connect-cms`, {
+    method: 'POST',
+    headers: getHeaders({ 'x-website-id': websiteId }),
+    body: JSON.stringify({ platform, ...details }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'CMS connection failed' }));
+    throw new Error(err.message || err.error || 'CMS connection failed');
+  }
+  return res.json();
+}
+
+export async function getOnboardingStatus(websiteId: string): Promise<any> {
+  const res = await fetch(`/api/websites/${websiteId}/onboarding-status`, {
+    headers: getHeaders({ 'x-website-id': websiteId }),
+  });
+  if (!res.ok) throw new Error('Failed to fetch onboarding status');
   return res.json();
 }
 

@@ -5,6 +5,8 @@ import { getPrismaClient } from '../db/prismaClient';
 import { isProductionMode } from '../config/runtimeMode';
 import crypto from 'crypto';
 
+export type { AuthenticatedPrincipal };
+
 export interface IAuthenticationProvider {
   authenticate(req: Request): Promise<AuthenticatedPrincipal | null>;
 }
@@ -54,7 +56,7 @@ export class ProductionAuthenticationProvider implements IAuthenticationProvider
     return `${header}.${payloadEncoded}.${signature}`;
   }
 
-  private verifyJwt(token: string): AuthenticatedPrincipal | null {
+  public static verifyJwt(token: string): AuthenticatedPrincipal | null {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const [headerB64, payloadB64, signatureB64] = parts;
@@ -99,7 +101,7 @@ export class ProductionAuthenticationProvider implements IAuthenticationProvider
 
     // 1. Try JWT verification first
     if (token.includes('.')) {
-      const jwtPrincipal = this.verifyJwt(token);
+      const jwtPrincipal = ProductionAuthenticationProvider.verifyJwt(token);
       if (jwtPrincipal) {
         return jwtPrincipal;
       }
@@ -152,15 +154,28 @@ export class ProductionAuthenticationProvider implements IAuthenticationProvider
 
 /**
  * Development & Testing Authentication Provider
- * Allows header-based principal resolution in non-production environments.
+ * Validates cryptographic JWT tokens, user tokens, or explicit test headers in non-production environments.
+ * Strictly returns null for unauthenticated requests to prevent silent tenant/principal bypasses.
  */
 export class DevelopmentAuthenticationProvider implements IAuthenticationProvider {
+  private prodProvider = new ProductionAuthenticationProvider();
+
   async authenticate(req: Request): Promise<AuthenticatedPrincipal | null> {
     const authHeader = req.headers.authorization;
     const prisma = getPrismaClient();
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7).trim();
+
+      // 1. Try cryptographic JWT verification
+      if (token.includes('.')) {
+        const principal = await this.prodProvider.authenticate(req);
+        if (principal) {
+          return principal;
+        }
+      }
+
+      // 2. Lookup user by ID or API Key
       if (prisma) {
         try {
           const user = await prisma.user.findFirst({
@@ -186,29 +201,34 @@ export class DevelopmentAuthenticationProvider implements IAuthenticationProvide
             };
           }
         } catch {
-          // fallback to header principal
+          // continue
         }
       }
     }
 
     const userIdHeader = req.headers['x-user-id'] as string;
-    const workspaceHeader = (req.headers['x-workspace-id'] as string) || 'default-workspace';
+    const workspaceHeader = req.headers['x-workspace-id'] as string;
+    const userRoleHeader = req.headers['x-user-role'] as string;
 
-    if (userIdHeader) {
+    if (userIdHeader || workspaceHeader || userRoleHeader) {
+      const uId = userIdHeader || 'dev-user-test';
+      const wId = workspaceHeader || 'default-workspace';
+      const role = (userRoleHeader || 'OWNER') as UserRole;
       return {
-        userId: userIdHeader,
-        email: (req.headers['x-user-email'] as string) || `${userIdHeader}@aiseo.local`,
-        isSystemAdmin: req.headers['x-is-admin'] === 'true' || req.headers['x-user-role'] === 'ADMIN',
+        userId: uId,
+        email: (req.headers['x-user-email'] as string) || `${uId}@aiseo.local`,
+        isSystemAdmin: req.headers['x-is-admin'] === 'true' || userRoleHeader === 'ADMIN',
         workspaceMemberships: [
           {
-            workspaceId: workspaceHeader,
-            role: ((req.headers['x-user-role'] as UserRole) || 'OWNER') as UserRole,
+            workspaceId: wId,
+            role,
           },
         ],
       };
     }
 
-    return DEV_DEFAULT_PRINCIPAL;
+    // Never silently return a fake principal for unauthenticated requests
+    return null;
   }
 }
 

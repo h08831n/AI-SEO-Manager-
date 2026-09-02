@@ -40,7 +40,14 @@ export function requireWorkspaceAuth(minRole: UserRole = 'VIEWER') {
         (req.headers['x-workspace-id'] as string) ||
         (req.query.workspaceId as string) ||
         (req.body && req.body.workspaceId) ||
-        'default-workspace';
+        principal.workspaceMemberships[0]?.workspaceId;
+
+      if (!requestedWorkspaceId) {
+        return res.status(400).json({
+          error: 'MISSING_TENANT_CONTEXT',
+          message: 'Workspace context is required via header x-workspace-id or session.',
+        });
+      }
 
       req.workspaceId = requestedWorkspaceId;
 
@@ -74,6 +81,7 @@ export function requireWebsiteAccess(minRole: UserRole = 'VIEWER') {
       req.principal = principal;
       const websiteId =
         req.params.websiteId ||
+        req.params.id ||
         (req.headers['x-website-id'] as string) ||
         (req.query.websiteId as string) ||
         (req.body && req.body.websiteId);

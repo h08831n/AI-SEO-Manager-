@@ -5,16 +5,8 @@ import {
   RankedKeyword,
   CrawledUrl,
   SEOAgent,
-  SafetyConfig,
   AutonomyMode,
 } from './types';
-import {
-  INITIAL_WEBSITES,
-  INITIAL_HEALTH_STATE,
-  MOCK_KEYWORDS,
-  MOCK_CRAWL_SNAPSHOT_CURRENT,
-  MOCK_COMPETITOR_GAPS,
-} from './data/mockData';
 import {
   getAuthSession,
   loginUser,
@@ -27,6 +19,8 @@ import {
   getRecommendations,
   getActionExecutions,
   getKeywords,
+  getCrawlRuns,
+  getCrawledPages,
   getObservabilityStatus,
   approveActionRequest,
   rejectActionRequest,
@@ -61,151 +55,29 @@ import { AICopilotView } from './components/views/AICopilotView';
 import { SettingsView } from './components/views/SettingsView';
 import { BillingView } from './components/views/BillingView';
 
+const defaultEmptyHealthState: SEOHealthState = {
+  overallScore: 0,
+  previousScore: 0,
+  lastAudited: new Date().toISOString(),
+  pillars: {},
+};
+
 export function App() {
   const [currentTab, setCurrentTab] = useState<SaaSTabId>('dashboard');
   const [session, setSession] = useState<any>(null);
-  const [workspaces, setWorkspaces] = useState<any[]>([
-    { id: 'ws-techscale-org', name: 'TechScale Global Org', tier: 'Enterprise Autonomous Suite' },
-    { id: 'ws-growth-ventures', name: 'Acme Media Labs', tier: 'Scale Plan' },
-    { id: 'ws-client-portfolio', name: 'Agency Client Suite', tier: 'Pro Plan' },
-  ]);
-  const [activeWorkspace, setActiveWorkspace] = useState<any>({
-    id: 'ws-techscale-org',
-    name: 'TechScale Global Org',
-    planTier: 'ENTERPRISE',
-  });
+  const [workspaces, setWorkspaces] = useState<any[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = useState<any>(null);
 
-  const [websites, setWebsites] = useState<Website[]>(INITIAL_WEBSITES);
-  const [selectedWebsite, setSelectedWebsite] = useState<Website>(INITIAL_WEBSITES[0]);
-  const [healthState, setHealthState] = useState<SEOHealthState>(INITIAL_HEALTH_STATE);
-  const [keywords, setKeywords] = useState<RankedKeyword[]>(MOCK_KEYWORDS);
+  const [websites, setWebsites] = useState<Website[]>([]);
+  const [selectedWebsite, setSelectedWebsite] = useState<Website | null>(null);
+  const [healthState, setHealthState] = useState<SEOHealthState>(defaultEmptyHealthState);
+  const [keywords, setKeywords] = useState<RankedKeyword[]>([]);
+  const [crawledPages, setCrawledPages] = useState<CrawledUrl[]>([]);
+  const [competitorsList, setCompetitorsList] = useState<any[]>([]);
   const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>('SUPERVISED');
 
   // Swarm Agents State
-  const [agents, setAgents] = useState<SEOAgent[]>([
-    {
-      id: 'agent-1',
-      role: 'TECHNICAL_AGENT',
-      name: 'Technical SEO Agent',
-      title: 'HTML, Canonical & Web Vitals Specialist',
-      avatarColor: 'bg-emerald-600',
-      description: 'Continuously validates canonical tags, XML sitemaps, indexability, 301 redirect chains, and Core Web Vitals.',
-      status: 'ANALYZING',
-      currentTask: 'Inspecting trailing-slash canonical consistency on /pricing',
-      issuesSolvedCount: 42,
-      actionsExecutedCount: 38,
-      successRate: 98.6,
-      learningProgress: 95.4,
-      activePillars: ['Indexability', 'Crawlability', 'Technical', 'Core Web Vitals'],
-      lastActivityTimestamp: '2 mins ago',
-      recentLogs: [
-        'DOM inspection completed for 48 URLs',
-        'VERIFIED: Self-referencing canonical active on /docs/cloud-api',
-        'Crawl budget efficiency: 99.4%',
-      ],
-    },
-    {
-      id: 'agent-2',
-      role: 'CONTENT_STRATEGY_AGENT',
-      name: 'Content Strategy Agent',
-      title: 'Decay, Clustering & Semantic Authority Specialist',
-      avatarColor: 'bg-indigo-600',
-      description: 'Monitors content decay velocity, detects keyword cannibalization, and identifies high-intent topic cluster gaps.',
-      status: 'MONITORING',
-      currentTask: 'Calculating topical authority vector for "autonomous seo"',
-      issuesSolvedCount: 29,
-      actionsExecutedCount: 24,
-      successRate: 96.2,
-      learningProgress: 92.1,
-      activePillars: ['Content Quality', 'Search Intent', 'Semantic Coverage', 'Freshness'],
-      lastActivityTimestamp: '4 mins ago',
-      recentLogs: [
-        'Content decay scan completed across 12 evergreen posts',
-        'High-intent semantic gap identified in Enterprise comparison tier',
-      ],
-    },
-    {
-      id: 'agent-3',
-      role: 'GROWTH_AGENT',
-      name: 'Growth & SERP Agent',
-      title: 'Rank Velocity & CTR Optimization Specialist',
-      avatarColor: 'bg-cyan-600',
-      description: 'Identifies striking-distance keywords (pos 4-15), tests high-CTR meta titles, and captures Featured Snippets.',
-      status: 'EXECUTING',
-      currentTask: 'Deploying high-intent meta title hook on /pricing',
-      issuesSolvedCount: 37,
-      actionsExecutedCount: 35,
-      successRate: 97.4,
-      learningProgress: 94.8,
-      activePillars: ['CTR', 'Ranking Health', 'Conversion', 'UX'],
-      lastActivityTimestamp: 'Just now',
-      recentLogs: [
-        'SERP difference-in-differences test verified +18.4% CTR lift',
-        'Striking distance keyword "autonomous seo platform" promoted to Pos #3',
-      ],
-    },
-    {
-      id: 'agent-4',
-      role: 'COMPETITOR_AGENT',
-      name: 'Competitor Intelligence Agent',
-      title: 'SERP Overlap & Gap Interception Specialist',
-      avatarColor: 'bg-rose-600',
-      description: 'Monitors competitor keyword surges, backlink velocity, content gaps, and algorithmic market-share shifts.',
-      status: 'ANALYZING',
-      currentTask: 'Analyzing SERP overlap gap against ahrefs.com',
-      issuesSolvedCount: 19,
-      actionsExecutedCount: 16,
-      successRate: 95.0,
-      learningProgress: 91.0,
-      activePillars: ['External Authority', 'Competitive Gaps', 'Market Share'],
-      lastActivityTimestamp: '8 mins ago',
-      recentLogs: [
-        'Discovered 4 new high-volume commercial keywords with low difficulty',
-        'Outranking vulnerability detected on competitor core landing page',
-      ],
-    },
-    {
-      id: 'agent-5',
-      role: 'AUDITOR_AGENT',
-      name: 'SEO Auditor Agent',
-      title: '17-Pillar Health Score & Compliance Specialist',
-      avatarColor: 'bg-amber-600',
-      description: 'Aggregates 17 health pillars into Bayesian diagnostic score, detects Google Core Update turbulence, and audits EEAT.',
-      status: 'LEARNING',
-      currentTask: 'Recalibrating Bayesian posterior weights across 17 pillars',
-      issuesSolvedCount: 64,
-      actionsExecutedCount: 61,
-      successRate: 99.1,
-      learningProgress: 97.8,
-      activePillars: ['17 Health Pillars', 'EEAT', 'Compliance'],
-      lastActivityTimestamp: '1 min ago',
-      recentLogs: [
-        'Overall 17-pillar health score evaluated: 88/100 (+6pts)',
-        'Zero critical compliance regressions detected',
-      ],
-    },
-    {
-      id: 'agent-6',
-      role: 'AUTOMATION_MANAGER',
-      name: 'Automation Manager',
-      title: '6-Stage Verification & Safety Gate Governor',
-      avatarColor: 'bg-teal-600',
-      description: 'Governs multi-stage verification pipelines, canary rollouts, rate limits, zero-downtime rollbacks, and circuit breakers.',
-      status: 'MONITORING',
-      currentTask: 'Tracking Stage 3 Traffic DiD verification window',
-      issuesSolvedCount: 51,
-      actionsExecutedCount: 51,
-      successRate: 100.0,
-      learningProgress: 98.9,
-      activePillars: ['Execution Pipeline', 'Canary Rollout', 'Rollback Journal'],
-      lastActivityTimestamp: 'Just now',
-      recentLogs: [
-        'Zero-downtime rollback journal snapshot captured for act-103',
-        'Circuit breakers armed and nominal. 0 anomalies detected.',
-      ],
-    },
-  ]);
-
+  const [agents, setAgents] = useState<SEOAgent[]>([]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [actions, setActions] = useState<any[]>([]);
   const [observability, setObservability] = useState({ db: 'UP', redis: 'UP', worker: 'UP' });
@@ -217,6 +89,7 @@ export function App() {
   const [isLoopModalOpen, setIsLoopModalOpen] = useState(false);
   const [isLoopRunning, setIsLoopRunning] = useState(false);
   const [copilotContextPrompt, setCopilotContextPrompt] = useState('');
+  const [isLoadingInitial, setIsLoadingInitial] = useState(true);
 
   // 1. Initial Session Authentication
   useEffect(() => {
@@ -236,7 +109,9 @@ export function App() {
           }
         }
       } catch (err) {
-        console.warn('Session initialization warning:', err);
+        console.warn('Session initialization error:', err);
+      } finally {
+        setIsLoadingInitial(false);
       }
     }
     initSession();
@@ -251,16 +126,16 @@ export function App() {
           id: w.id,
           domain: w.domain,
           name: w.name || w.domain,
-          industry: w.industry || 'Cloud Infrastructure SaaS',
+          industry: w.industry || 'B2B SaaS',
           productionUrl: w.productionUrl || `https://${w.domain}`,
           sitemapUrl: w.sitemapUrl || `https://${w.domain}/sitemap.xml`,
           defaultLanguage: w.defaultLanguage || 'en-US',
           competitors: w.competitors || ['ahrefs.com', 'semrush.com'],
-          gscConnected: w.gscConnected ?? true,
-          ga4Connected: w.ga4Connected ?? true,
-          wpConnected: w.wpConnected ?? true,
+          gscConnected: w.gscConnected ?? false,
+          ga4Connected: w.ga4Connected ?? false,
+          wpConnected: w.cmsConnected ?? false,
           sheetsConnected: false,
-          lastCrawlTimestamp: w.lastCrawlTimestamp || new Date().toISOString(),
+          lastCrawlTimestamp: w.lastCrawlTimestamp || w.createdAt || new Date().toISOString(),
           capacityConfig: w.capacityConfig || {
             articlesPerWeek: 3,
             writersCount: 2,
@@ -269,10 +144,15 @@ export function App() {
           },
         }));
         setWebsites(mapped);
-        setSelectedWebsite(mapped[0]);
+        setSelectedWebsite((prev) => {
+          if (prev && mapped.some((m) => m.id === prev.id)) {
+            return mapped.find((m) => m.id === prev.id) || mapped[0];
+          }
+          return mapped[0];
+        });
       } else {
-        // If workspace has 0 websites, open Onboarding flow!
-        setIsOnboardingOpen(true);
+        setWebsites([]);
+        setSelectedWebsite(null);
       }
     } catch (e) {
       console.warn('Error loading websites:', e);
@@ -280,17 +160,23 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    loadWorkspaceWebsites();
+    if (activeWorkspace?.id) {
+      loadWorkspaceWebsites();
+    }
   }, [loadWorkspaceWebsites, activeWorkspace?.id]);
 
-  // 3. Load Dashboard Overview & Agent Swarm State for Selected Website
+  // 3. Load Dashboard Overview, Agents, Keywords & Crawl Data for Selected Website
   const loadDashboardData = useCallback(async (siteId: string) => {
     if (!siteId) return;
     try {
-      const [overview, swarm, obs] = await Promise.allSettled([
+      const [overview, swarm, obs, kwRes, recsRes, actsRes, crawlRunsRes] = await Promise.allSettled([
         getDashboardOverview(siteId),
         getAgentSwarmStatus(siteId),
         getObservabilityStatus(),
+        getKeywords(siteId),
+        getRecommendations(siteId),
+        getActionExecutions(siteId),
+        getCrawlRuns(siteId),
       ]);
 
       if (obs.status === 'fulfilled' && obs.value) {
@@ -299,22 +185,51 @@ export function App() {
 
       if (overview.status === 'fulfilled' && overview.value) {
         const data = overview.value;
-        if (data.health) {
+        if (data.healthState) {
+          setHealthState(data.healthState);
+        } else if (data.health) {
           setHealthState(data.health);
         }
-        if (Array.isArray(data.recommendations)) {
+        if (Array.isArray(data.recommendations) && data.recommendations.length > 0) {
           setRecommendations(data.recommendations);
         }
-        if (Array.isArray(data.actions)) {
-          setActions(data.actions);
+        if (Array.isArray(data.recentActions) && data.recentActions.length > 0) {
+          setActions(data.recentActions);
         }
-        if (Array.isArray(data.keywords)) {
-          setKeywords(data.keywords);
+        if (Array.isArray(data.agents) && data.agents.length > 0) {
+          setAgents(data.agents);
         }
+      }
+
+      if (recsRes.status === 'fulfilled' && recsRes.value?.recommendations) {
+        if (recsRes.value.recommendations.length > 0) {
+          setRecommendations(recsRes.value.recommendations);
+        }
+      }
+
+      if (actsRes.status === 'fulfilled' && actsRes.value?.executions) {
+        if (actsRes.value.executions.length > 0) {
+          setActions(actsRes.value.executions);
+        }
+      }
+
+      if (kwRes.status === 'fulfilled' && kwRes.value?.keywords) {
+        setKeywords(kwRes.value.keywords);
       }
 
       if (swarm.status === 'fulfilled' && Array.isArray(swarm.value) && swarm.value.length > 0) {
         setAgents(swarm.value);
+      }
+
+      // Load crawl pages if runs exist
+      if (crawlRunsRes.status === 'fulfilled' && crawlRunsRes.value?.runs?.length > 0) {
+        const latestRun = crawlRunsRes.value.runs[0];
+        if (latestRun?.id) {
+          const pagesRes = await getCrawledPages(siteId, latestRun.id).catch(() => null);
+          if (pagesRes && Array.isArray(pagesRes.pages)) {
+            setCrawledPages(pagesRes.pages);
+          }
+        }
       }
     } catch (err) {
       console.warn('Error loading dashboard data:', err);
@@ -324,6 +239,13 @@ export function App() {
   useEffect(() => {
     if (selectedWebsite?.id) {
       loadDashboardData(selectedWebsite.id);
+    } else {
+      setHealthState(defaultEmptyHealthState);
+      setRecommendations([]);
+      setActions([]);
+      setKeywords([]);
+      setAgents([]);
+      setCrawledPages([]);
     }
   }, [selectedWebsite?.id, loadDashboardData]);
 
@@ -346,7 +268,7 @@ export function App() {
   // Handlers
   const handleApproveAction = async (recId: string) => {
     const target = recommendations.find((r) => r.id === recId);
-    if (!target) return;
+    if (!target || !selectedWebsite) return;
 
     try {
       await approveActionRequest(recId).catch(() => null);
@@ -366,10 +288,11 @@ export function App() {
       beforeState: { baseline: 'Pre-approval snapshot' },
       afterState: { optimized: 'Approved & deployed mutation' },
       reason: target.reason || 'User approved from Decision Center.',
+      executedAt: new Date().toISOString(),
     };
     setActions((prev) => [newAction, ...prev]);
 
-    // Update agent issue count
+    // Update agent stats
     setAgents((prev) =>
       prev.map((a) =>
         a.role === 'TECHNICAL_AGENT' || a.role === 'GROWTH_AGENT'
@@ -387,6 +310,7 @@ export function App() {
   };
 
   const handleRollbackAction = async (actionId: string) => {
+    if (!selectedWebsite) return;
     try {
       await rollbackAction(actionId, selectedWebsite.id).catch(() => null);
     } catch (e) {}
@@ -402,12 +326,13 @@ export function App() {
     } catch (err: any) {}
     setHealthState((prev) => ({
       ...prev,
-      overallScore: Math.min(100, (prev.overallScore || 88) + 2),
+      overallScore: Math.min(100, (prev.overallScore || 80) + 2),
       lastAudited: new Date().toISOString(),
     }));
   };
 
   const handleTriggerSerpCheck = async (keywordId: string) => {
+    if (!selectedWebsite) return;
     try {
       await checkKeywordSerp(selectedWebsite.id, keywordId);
       setKeywords((prev) =>
@@ -419,6 +344,7 @@ export function App() {
   };
 
   const handleAddKeyword = async (kwText: string) => {
+    if (!selectedWebsite) return;
     try {
       await createKeyword(selectedWebsite.id, { keyword: kwText });
     } catch (e) {}
@@ -451,6 +377,7 @@ export function App() {
   };
 
   const handleTriggerAgentTask = async (agentId: string) => {
+    if (!selectedWebsite) return;
     setAgents((prev) =>
       prev.map((a) =>
         a.id === agentId
@@ -488,6 +415,7 @@ export function App() {
   };
 
   const handleExportCsv = async () => {
+    if (!selectedWebsite) return;
     try {
       await exportToCsv(keywords, `seo_audit_${selectedWebsite.domain}.csv`);
     } catch (e) {
@@ -504,6 +432,29 @@ export function App() {
     }
   };
 
+  // Fallback placeholder website for single views if no website is selected yet
+  const activeOrPlaceholderSite: Website = selectedWebsite || {
+    id: 'site-placeholder',
+    domain: 'your-website.com',
+    name: 'Add Your First Website',
+    industry: 'Technology',
+    productionUrl: 'https://your-website.com',
+    sitemapUrl: 'https://your-website.com/sitemap.xml',
+    defaultLanguage: 'en-US',
+    competitors: [],
+    gscConnected: false,
+    ga4Connected: false,
+    wpConnected: false,
+    sheetsConnected: false,
+    lastCrawlTimestamp: new Date().toISOString(),
+    capacityConfig: {
+      articlesPerWeek: 2,
+      writersCount: 1,
+      editorsCount: 1,
+      weeklyHours: 20,
+    },
+  };
+
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 antialiased font-sans overflow-hidden">
       {/* SaaS Virtual Team Sidebar */}
@@ -512,7 +463,7 @@ export function App() {
         onSelectTab={setCurrentTab}
         recommendationsCount={recommendations.length}
         activeActionsCount={actions.filter((a) => a.status === 'VERIFIED').length}
-        seoScore={healthState.overallScore || 88}
+        seoScore={healthState.overallScore || 0}
         observabilityStatus={observability}
       />
 
@@ -521,8 +472,8 @@ export function App() {
         {/* Top Navigation Bar */}
         <TopNavbar
           websites={websites}
-          selectedWebsite={selectedWebsite}
-          onSelectWebsite={setSelectedWebsite}
+          selectedWebsite={activeOrPlaceholderSite}
+          onSelectWebsite={(site) => setSelectedWebsite(site)}
           onOpenAddWebsiteModal={() => setIsOnboardingOpen(true)}
           onOpenCustomerJourney={() => {
             setCustomerJourneyInitialStep(1);
@@ -532,21 +483,42 @@ export function App() {
           onOpenCopilot={() => setCurrentTab('copilot')}
           onRunDailyLoop={() => setIsLoopModalOpen(true)}
           isLoopRunning={isLoopRunning}
-          activeWorkspaceName={activeWorkspace?.name || 'TechScale Global Org'}
-          activeWorkspaceId={activeWorkspace?.id || 'ws-techscale-org'}
+          activeWorkspaceName={activeWorkspace?.name || 'My Workspace'}
+          activeWorkspaceId={activeWorkspace?.id || ''}
           workspaces={workspaces}
           onSelectWorkspace={handleSwitchWorkspace}
-          userEmail={session?.user?.email || 'hosseinnaghneh1@gmail.com'}
-          userName={session?.user?.name || 'Hossein Naghneh'}
+          userEmail={session?.user?.email || 'user@aiseo.io'}
+          userName={session?.user?.name || 'Workspace Admin'}
           systemAlertsCount={recommendations.length > 0 ? 2 : 0}
         />
 
         {/* Dynamic Page Content */}
         <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 scrollbar-thin">
           <div className="max-w-7xl mx-auto">
+            {/* Empty Website State Prompt */}
+            {websites.length === 0 && !isLoadingInitial && (
+              <div className="mb-6 p-6 rounded-2xl bg-gradient-to-r from-blue-950/40 via-indigo-950/30 to-purple-950/30 border border-blue-500/30 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-white">Welcome to AI SEO Manager</h3>
+                  <p className="text-xs text-slate-300 mt-1">
+                    No websites connected to workspace <strong>{activeWorkspace?.name}</strong> yet. Complete the first-customer onboarding journey to activate your autonomous SEO team.
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setCustomerJourneyInitialStep(1);
+                    setIsCustomerJourneyOpen(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-600/30 transition-all cursor-pointer whitespace-nowrap"
+                >
+                  Start First-Customer Journey
+                </button>
+              </div>
+            )}
+
             {currentTab === 'dashboard' && (
               <DashboardView
-                website={selectedWebsite}
+                website={activeOrPlaceholderSite}
                 healthState={healthState}
                 keywords={keywords}
                 recommendations={recommendations}
@@ -570,7 +542,7 @@ export function App() {
 
             {currentTab === 'agents' && (
               <SEOAgentsView
-                website={selectedWebsite}
+                website={activeOrPlaceholderSite}
                 agents={agents}
                 onTriggerAgentTask={handleTriggerAgentTask}
                 onOpenCopilotWithAgent={(agentName, context) =>
@@ -581,53 +553,57 @@ export function App() {
 
             {(currentTab === 'decisions' || currentTab === 'recommendations') && (
               <DecisionsView
-                websiteId={selectedWebsite.id}
+                websiteId={activeOrPlaceholderSite.id}
                 recommendations={recommendations}
                 onApproveAction={handleApproveAction}
                 onRejectAction={handleRejectAction}
                 onExecuteNow={handleApproveAction}
                 onAskCopilot={handleOpenCopilotWithContext}
                 onRefresh={() => {
-                  loadDashboardData(selectedWebsite.id);
+                  if (selectedWebsite?.id) {
+                    loadDashboardData(selectedWebsite.id);
+                  }
                 }}
               />
             )}
 
             {currentTab === 'actions' && (
               <ActionsView
-                websiteId={selectedWebsite.id}
+                websiteId={activeOrPlaceholderSite.id}
                 actions={actions}
                 onRollbackAction={handleRollbackAction}
-                onVerifyStage={(actId, stage) => {
+                onVerifyStage={(actId) => {
                   setActions((prev) =>
                     prev.map((a) => (a.id === actId ? { ...a, status: 'VERIFIED' } : a))
                   );
                 }}
                 onRefresh={() => {
-                  loadDashboardData(selectedWebsite.id);
+                  if (selectedWebsite?.id) {
+                    loadDashboardData(selectedWebsite.id);
+                  }
                 }}
               />
             )}
 
             {currentTab === 'analytics' && (
               <AnalyticsView
-                websiteId={selectedWebsite.id}
+                websiteId={activeOrPlaceholderSite.id}
                 onExportCsv={handleExportCsv}
               />
             )}
 
             {currentTab === 'health' && (
               <SEOHealthView
-                websiteId={selectedWebsite.id}
+                websiteId={activeOrPlaceholderSite.id}
                 healthState={healthState}
-                crawledPages={MOCK_CRAWL_SNAPSHOT_CURRENT.urls}
-                onRefreshHealth={() => handleStartCrawl(selectedWebsite.id)}
+                crawledPages={crawledPages}
+                onRefreshHealth={() => selectedWebsite && handleStartCrawl(selectedWebsite.id)}
               />
             )}
 
             {currentTab === 'keywords' && (
               <KeywordsView
-                websiteId={selectedWebsite.id}
+                websiteId={activeOrPlaceholderSite.id}
                 keywords={keywords}
                 onTriggerSerpCheck={handleTriggerSerpCheck}
                 onAddKeyword={handleAddKeyword}
@@ -636,8 +612,8 @@ export function App() {
 
             {currentTab === 'competitors' && (
               <CompetitorsView
-                websiteId={selectedWebsite.id}
-                competitors={MOCK_COMPETITOR_GAPS}
+                websiteId={activeOrPlaceholderSite.id}
+                competitors={competitorsList}
                 onRefresh={() => {}}
                 onToggleExclusion={() => {}}
               />
@@ -646,8 +622,8 @@ export function App() {
             {currentTab === 'projects' && (
               <ProjectsView
                 websites={websites}
-                selectedWebsite={selectedWebsite}
-                onSelectWebsite={setSelectedWebsite}
+                selectedWebsite={activeOrPlaceholderSite}
+                onSelectWebsite={(site) => setSelectedWebsite(site)}
                 onOpenAddWebsiteModal={() => setIsOnboardingOpen(true)}
                 onStartCrawl={handleStartCrawl}
                 onNavigateTab={setCurrentTab}
@@ -656,7 +632,7 @@ export function App() {
 
             {currentTab === 'integrations' && (
               <IntegrationsView
-                website={selectedWebsite}
+                website={activeOrPlaceholderSite}
                 onRefreshIntegrations={() => {}}
                 onExportCsv={handleExportCsv}
               />
@@ -664,7 +640,7 @@ export function App() {
 
             {currentTab === 'autonomy' && (
               <AutonomySafetyView
-                website={selectedWebsite}
+                website={activeOrPlaceholderSite}
                 initialConfig={{
                   autonomyLevel: autonomyMode,
                   rollbackEnabled: true,
@@ -681,14 +657,14 @@ export function App() {
 
             {currentTab === 'copilot' && (
               <AICopilotView
-                website={selectedWebsite}
+                website={activeOrPlaceholderSite}
                 healthState={healthState}
                 initialPrompt={copilotContextPrompt}
               />
             )}
 
             {currentTab === 'settings' && (
-              <SettingsView website={selectedWebsite} />
+              <SettingsView website={activeOrPlaceholderSite} />
             )}
 
             {currentTab === 'billing' && (
@@ -716,8 +692,8 @@ export function App() {
             setActions((prev) => [data.verifiedAction, ...prev]);
             setHealthState((prev) => ({
               ...prev,
-              overallScore: Math.min(100, (prev.overallScore || 88) + 6),
-              previousScore: prev.overallScore || 88,
+              overallScore: Math.min(100, (prev.overallScore || 80) + 8),
+              previousScore: prev.overallScore || 75,
             }));
           }
           setIsCustomerJourneyOpen(false);
@@ -779,7 +755,7 @@ export function App() {
         }}
       />
 
-      {isLoopModalOpen && (
+      {isLoopModalOpen && selectedWebsite && (
         <AutonomousLoopModal
           isOpen={isLoopModalOpen}
           websiteId={selectedWebsite.id}
